@@ -8,6 +8,7 @@ from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import QApplication
 
 from config import AppConfig
+from ai.profile_service import ProfileService
 from pet_window import PetWindow
 from reminder_manager import ReminderManager
 from todo_manager import TodoManager, TodoStorageError
@@ -35,7 +36,13 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     reminder_manager = ReminderManager(todo_manager)
-    pet = PetWindow(AppConfig.load(), todo_manager, reminder_manager)
+    profile_service = ProfileService()
+    pet = PetWindow(
+        AppConfig.load(),
+        todo_manager,
+        reminder_manager,
+        profile_service=profile_service,
+    )
     pet.show()
     reminder_manager.start(immediate=True)
     app.aboutToQuit.connect(pet.close)

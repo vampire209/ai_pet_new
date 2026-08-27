@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from threading import Event
 from typing import Any
 
@@ -28,11 +28,13 @@ class ChatService:
         *,
         config: DeepSeekConfig | None = None,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
+        system_prompt_provider: Callable[[], str] | None = None,
         max_context_rounds: int | None = None,
     ) -> None:
         self.config = config or DeepSeekConfig.from_environment()
         self.client = client or DeepSeekClient(self.config)
         self.system_prompt = system_prompt.strip() or DEFAULT_SYSTEM_PROMPT
+        self._system_prompt_provider = system_prompt_provider
         configured_rounds = (
             self.config.max_context_rounds
             if max_context_rounds is None
@@ -61,6 +63,25 @@ class ChatService:
             *self.history,
         )
 
+    def set_system_prompt(self, system_prompt: str) -> None:
+        """Update only future requests; session history remains untouched."""
+
+        self.system_prompt = system_prompt.strip() or DEFAULT_SYSTEM_PROMPT
+
+    def set_system_prompt_provider(
+        self,
+        provider: Callable[[], str] | None,
+    ) -> None:
+        """Use one fresh Persona snapshot at the start of every future turn."""
+
+        self._system_prompt_provider = provider
+        self.refresh_system_prompt()
+
+    def refresh_system_prompt(self) -> str:
+        if self._system_prompt_provider is not None:
+            self.set_system_prompt(self._system_prompt_provider())
+        return self.system_prompt
+
     def begin_turn(self, user_text: str) -> tuple[dict[str, str], ...]:
         normalized = user_text.strip()
         if not normalized:
@@ -71,6 +92,7 @@ class ChatService:
             raise MissingAPIKeyError(
                 "未配置 DeepSeek API Key，请先设置 DEEPSEEK_API_KEY。"
             )
+        self.refresh_system_prompt()
         self._pending_user = normalized
         return (
             *self.messages,

@@ -49,6 +49,9 @@ from ai.chat_theme import CHAT_WINDOW_STYLE
 from ai.chat_ui_config import ChatUiSettings, ChatUiSettingsError
 from ai.chat_worker import ChatStreamWorker
 from ai.deepseek_client import DeepSeekClientError
+from ai.persona_builder import PersonaBuilder
+from ai.profile import DEFAULT_PET_NAME, PetProfile
+from ai.profile_service import ProfileService
 from models.task import TaskDataError
 from todo_manager import TodoManager, TodoStorageError
 from ui_resources import (
@@ -445,6 +448,8 @@ class ChatWindow(QWidget):
         todo_manager: TodoManager | None = None,
         action_router: ChatActionRouter | None = None,
         ui_settings: ChatUiSettings | None = None,
+        profile_service: ProfileService | None = None,
+        persona_builder: PersonaBuilder | None = None,
     ) -> None:
         super().__init__(parent)
         self._service = service or ChatService()
@@ -452,6 +457,16 @@ class ChatWindow(QWidget):
         self._action_router = action_router or ChatActionRouter()
         self._thread_pool = thread_pool or QThreadPool.globalInstance()
         self._ui_settings = ui_settings or ChatUiSettings()
+        self._profile_service = profile_service
+        self._persona_builder = persona_builder or PersonaBuilder()
+        self._pet_name = DEFAULT_PET_NAME
+        if profile_service is not None:
+            self._pet_name = profile_service.profile.pet_name
+            self._service.set_system_prompt_provider(
+                lambda service=profile_service, builder=self._persona_builder: (
+                    builder.build(service.profile)
+                )
+            )
         self._worker: ChatStreamWorker | None = None
         self._assistant_label: QLabel | None = None
         self._assistant_text = ""
@@ -472,6 +487,8 @@ class ChatWindow(QWidget):
             avatar_source.path == UI_ASSETS.idle_fallback
         )
         self._setup_ui()
+        if profile_service is not None:
+            profile_service.profile_changed.connect(self.apply_profile)
         if not self._service.is_configured:
             self._show_status(
                 "未配置 DeepSeek API Key；本地待办创建仍可使用。",
@@ -480,7 +497,7 @@ class ChatWindow(QWidget):
 
     def _setup_ui(self) -> None:
         self.setObjectName("chatWindow")
-        self.setWindowTitle("AI 桌宠聊天")
+        self.setWindowTitle(f"AI 桌宠聊天 - {self._pet_name}")
         self.setWindowIcon(load_application_icon())
         self.setMinimumSize(600, 650)
         self.resize(800, 780)
@@ -507,9 +524,9 @@ class ChatWindow(QWidget):
         title_layout = QVBoxLayout()
         title_layout.setContentsMargins(0, 1, 0, 1)
         title_layout.setSpacing(3)
-        name = QLabel("桌宠")
-        name.setObjectName("chatPetName")
-        title_layout.addWidget(name)
+        self.header_name_label = QLabel(self._pet_name)
+        self.header_name_label.setObjectName("chatPetName")
+        title_layout.addWidget(self.header_name_label)
         self.header_status_label = QLabel("陪你聊聊天")
         self.header_status_label.setObjectName("chatPetStatus")
         title_layout.addWidget(self.header_status_label)
@@ -908,7 +925,7 @@ class ChatWindow(QWidget):
         bubble_layout = QVBoxLayout(bubble)
         bubble_layout.setContentsMargins(13, 9, 13, 10)
         bubble_layout.setSpacing(3)
-        author = QLabel("你" if role == "user" else "桌宠")
+        author = QLabel("你" if role == "user" else self._pet_name)
         author.setObjectName("messageAuthor")
         bubble_layout.addWidget(author)
         content = QLabel(text)
@@ -990,6 +1007,15 @@ class ChatWindow(QWidget):
 
     def _set_header_status(self, message: str) -> None:
         self.header_status_label.setText(message)
+
+    def apply_profile(self, profile: PetProfile) -> None:
+        """Apply a saved profile to the header and all future AI requests."""
+
+        self._pet_name = profile.pet_name
+        self._service.refresh_system_prompt()
+        self.setWindowTitle(f"AI 桌宠聊天 - {self._pet_name}")
+        if hasattr(self, "header_name_label"):
+            self.header_name_label.setText(self._pet_name)
 
     def _show_status(self, message: str, *, error: bool) -> None:
         self.status_label.setProperty("error", error)
@@ -1120,6 +1146,14 @@ class ChatWindow(QWidget):
     @property
     def ui_settings(self) -> ChatUiSettings:
         return self._ui_settings
+
+    @property
+    def profile_service(self) -> ProfileService | None:
+        return self._profile_service
+
+    @property
+    def pet_name(self) -> str:
+        return self._pet_name
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)

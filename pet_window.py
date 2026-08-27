@@ -19,12 +19,14 @@ from PySide6.QtWidgets import QApplication, QLabel, QMenu, QMessageBox
 from animation_manager import AnimationManager
 from animation_state import AnimationStateController
 from ai.chat_service import ChatService
+from ai.profile_service import ProfileService
 from chat_window import ChatWindow
 from config import AppConfig
 from models.reminder import Reminder
 from models.task import Task, TaskDataError
 from reminder_bubble import ReminderBubble
 from reminder_manager import ReminderManager
+from profile_window import ProfileWindow
 from todo_manager import TodoManager
 from todo_manager import TodoStorageError
 from todo_window import TodoWindow
@@ -40,6 +42,7 @@ class PetWindow(QLabel):
         reminder_manager: ReminderManager | None = None,
         parent=None,
         chat_service: ChatService | None = None,
+        profile_service: ProfileService | None = None,
     ) -> None:
         super().__init__(parent)
         self._config = config
@@ -48,6 +51,8 @@ class PetWindow(QLabel):
         self._todo_window: TodoWindow | None = None
         self._chat_service = chat_service
         self._chat_window: ChatWindow | None = None
+        self._profile_service = profile_service or ProfileService()
+        self._profile_window: ProfileWindow | None = None
         self._reminder_bubbles: dict[str, ReminderBubble] = {}
         self._press_global: QPoint | None = None
         self._drag_offset = QPoint()
@@ -205,6 +210,7 @@ class PetWindow(QLabel):
             self._chat_window = ChatWindow(
                 self._chat_service or ChatService(),
                 todo_manager=self._todo_manager,
+                profile_service=self._profile_service,
             )
         if self._chat_window.isMinimized():
             state = self._chat_window.windowState() & ~Qt.WindowState.WindowMinimized
@@ -212,6 +218,16 @@ class PetWindow(QLabel):
         self._chat_window.show()
         self._chat_window.raise_()
         self._chat_window.activateWindow()
+
+    def _open_profile_window(self) -> None:
+        if self._profile_window is None:
+            self._profile_window = ProfileWindow(self._profile_service)
+        if self._profile_window.isMinimized():
+            state = self._profile_window.windowState() & ~Qt.WindowState.WindowMinimized
+            self._profile_window.setWindowState(state | Qt.WindowState.WindowActive)
+        self._profile_window.show()
+        self._profile_window.raise_()
+        self._profile_window.activateWindow()
 
     def _on_reminder_due(self, task: Task, reminder: Reminder) -> None:
         existing = self._reminder_bubbles.get(reminder.id)
@@ -332,6 +348,11 @@ class PetWindow(QLabel):
         chat_action = QAction("AI聊天", menu)
         chat_action.triggered.connect(lambda _checked=False: self._open_chat_window())
         menu.addAction(chat_action)
+        profile_action = QAction("桌宠设置", menu)
+        profile_action.triggered.connect(
+            lambda _checked=False: self._open_profile_window()
+        )
+        menu.addAction(profile_action)
         menu.addSeparator()
 
         exit_action = QAction("退出", menu)
@@ -368,6 +389,14 @@ class PetWindow(QLabel):
         return self._chat_window
 
     @property
+    def profile_window(self) -> ProfileWindow | None:
+        return self._profile_window
+
+    @property
+    def profile_service(self) -> ProfileService:
+        return self._profile_service
+
+    @property
     def reminder_dialogs(self) -> tuple[ReminderBubble, ...]:
         """Phase 3/4 compatibility alias for the active reminder surface."""
         return tuple(self._reminder_bubbles.values())
@@ -384,6 +413,8 @@ class PetWindow(QLabel):
             self._todo_window.hide()
         if self._chat_window is not None:
             self._chat_window.shutdown()
+        if self._profile_window is not None:
+            self._profile_window.hide()
         for bubble in list(self._reminder_bubbles.values()):
             bubble.close()
         self._reminder_bubbles.clear()
