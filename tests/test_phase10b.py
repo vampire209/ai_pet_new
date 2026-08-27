@@ -70,9 +70,9 @@ class Phase10BMemoryTests(unittest.TestCase):
                 }
             finally:
                 connection.close()
-            self.assertEqual(
-                columns,
-                {"id", "content", "is_core", "archived", "created_at", "updated_at"},
+            self.assertTrue(
+                {"id", "content", "is_core", "archived", "created_at", "updated_at"}
+                <= columns
             )
 
     def test_02_create_memory_is_active_by_default(self) -> None:

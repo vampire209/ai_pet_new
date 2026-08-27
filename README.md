@@ -125,6 +125,21 @@ Phase 10B，运行时不会读取旧项目路径。
 - Phase 10B 不会自动生成记忆，也不会把记忆注入 DeepSeek Persona 或聊天上下文
 - Phase 10B 不包含 Embedding、向量检索、自动归档或自动遗忘规则
 
+## 聊天智能记忆
+
+- Phase 10C 会从“我最近在学习……”“我更喜欢……”“以后……”等少量具有长期价值的用户消息中自动形成活跃记忆
+- 普通闲聊、一次性要求、AI 回复和已经进入 Todo 流程的内容不会写入 Memory
+- 自动记忆优先匹配并更新同主题内容，避免同一事实不断新增
+- 自动生成的记忆始终是活跃记忆；核心记忆仍只能由用户在记忆管理中手动点击“☆ → ★”
+- 所有未归档核心记忆默认参与每轮聊天；普通活跃记忆按本地相关度最多选择 5 条
+- 当前用户消息和当前会话中的最新要求优先于长期记忆，Memory 不能覆盖 Todo 等应用能力边界
+- Clear Chat 仍只清聊天历史，下一次聊天可以重新按相关性取回长期记忆
+- 归档记忆默认不参与聊天，恢复到活跃后才会再次参与检索
+- 被实际注入的记忆会更新 use_count 与 last_used_at
+- 低重要度且至少 90 天未使用的非核心活跃记忆可以保守归档，但不会自动永久删除
+- 核心记忆永不自动归档，自动逻辑也不会设置或取消核心
+- 检索完全使用本地规则，不使用 Embedding、向量数据库，也不会为 Memory 额外发起 DeepSeek 请求
+
 ## 本地保存与兼容
 
 - 使用 `data/tasks.json` 本地持久化
@@ -182,7 +197,7 @@ python main.py
 python main.py --smoke-test
 ```
 
-运行 Phase 1–10B 全部自动化测试：
+运行 Phase 1–10C 全部自动化测试：
 
 ```powershell
 python -m unittest discover -s tests -p "test_phase*.py" -v
@@ -253,6 +268,15 @@ python tests\live_phase10b_memory.py
 
 该脚本验证新增、核心切换、归档/恢复、编辑、重启持久化，以及 Clear Chat
 不会清除 Memory。测试不会创建或修改正式用户目录中的 `memory.db`。
+
+Phase 10C 智能记忆 Fake Live（A–H 使用临时 SQLite，不调用真实 API）：
+
+```powershell
+python tests\live_phase10c_memory.py
+```
+
+该脚本验证钢琴记忆自动提取与去重、Clear 后召回、傅里叶相关检索、当前要求
+优先、长期偏好更新、低价值旧记忆归档和核心永不自动归档。
 
 Phase 9 人工验证：
 

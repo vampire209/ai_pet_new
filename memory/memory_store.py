@@ -1,4 +1,4 @@
-"""SQLite persistence for manual long-term memory records."""
+"""SQLite persistence and additive migration for long-term memories."""
 
 from __future__ import annotations
 
@@ -22,6 +22,17 @@ def default_memory_db_path() -> Path:
     return base / "ai_pet_new" / "memory.db"
 
 
+_PHASE10C_COLUMNS = (
+    ("category", "TEXT NOT NULL DEFAULT 'general'"),
+    ("importance", "REAL NOT NULL DEFAULT 0.5"),
+    ("last_used_at", "TEXT"),
+    ("use_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("expires_at", "TEXT"),
+    ("topic_key", "TEXT NOT NULL DEFAULT ''"),
+    ("source", "TEXT NOT NULL DEFAULT 'manual'"),
+)
+
+
 class MemoryStore:
     """Own one SQLite connection and expose persistence-only operations."""
 
@@ -39,7 +50,7 @@ class MemoryStore:
             self._connection = sqlite3.connect(target)
             self._connection.row_factory = sqlite3.Row
             self._connection.execute("PRAGMA foreign_keys = ON")
-            self._create_schema()
+            self._create_and_migrate_schema()
         except sqlite3.Error as exc:
             raise MemoryStorageError(f"无法打开记忆数据库：{exc}") from exc
         self._closed = False
@@ -48,7 +59,7 @@ class MemoryStore:
     def is_closed(self) -> bool:
         return self._closed
 
-    def _create_schema(self) -> None:
+    def _create_and_migrate_schema(self) -> None:
         try:
             with self._connection:
                 self._connection.execute(
@@ -62,18 +73,43 @@ class MemoryStore:
                             CHECK (archived IN (0, 1)),
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL,
+                        category TEXT NOT NULL DEFAULT 'general',
+                        importance REAL NOT NULL DEFAULT 0.5,
+                        last_used_at TEXT,
+                        use_count INTEGER NOT NULL DEFAULT 0,
+                        expires_at TEXT,
+                        topic_key TEXT NOT NULL DEFAULT '',
+                        source TEXT NOT NULL DEFAULT 'manual',
                         CHECK (NOT (archived = 1 AND is_core = 1))
                     )
                     """
                 )
+                existing_columns = {
+                    str(row["name"])
+                    for row in self._connection.execute(
+                        "PRAGMA table_info(memories)"
+                    ).fetchall()
+                }
+                for column_name, declaration in _PHASE10C_COLUMNS:
+                    if column_name not in existing_columns:
+                        self._connection.execute(
+                            f"ALTER TABLE memories ADD COLUMN "
+                            f"{column_name} {declaration}"
+                        )
                 self._connection.execute(
                     """
                     CREATE INDEX IF NOT EXISTS idx_memories_state_updated
                     ON memories (archived, is_core, updated_at DESC)
                     """
                 )
+                self._connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_memories_topic_state
+                    ON memories (topic_key, archived, is_core)
+                    """
+                )
         except sqlite3.Error as exc:
-            raise MemoryStorageError(f"无法初始化记忆数据库：{exc}") from exc
+            raise MemoryStorageError(f"无法初始化或升级记忆数据库：{exc}") from exc
 
     def insert(self, memory: MemoryRecord) -> None:
         try:
@@ -81,17 +117,12 @@ class MemoryStore:
                 self._connection.execute(
                     """
                     INSERT INTO memories (
-                        id, content, is_core, archived, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?)
+                        id, content, is_core, archived, created_at, updated_at,
+                        category, importance, last_used_at, use_count,
+                        expires_at, topic_key, source
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (
-                        memory.id,
-                        memory.content,
-                        int(memory.is_core),
-                        int(memory.archived),
-                        memory.created_at,
-                        memory.updated_at,
-                    ),
+                    self._record_values(memory),
                 )
         except sqlite3.Error as exc:
             raise MemoryStorageError(f"无法保存记忆：{exc}") from exc
@@ -102,7 +133,9 @@ class MemoryStore:
                 cursor = self._connection.execute(
                     """
                     UPDATE memories
-                    SET content = ?, is_core = ?, archived = ?, updated_at = ?
+                    SET content = ?, is_core = ?, archived = ?, updated_at = ?,
+                        category = ?, importance = ?, last_used_at = ?,
+                        use_count = ?, expires_at = ?, topic_key = ?, source = ?
                     WHERE id = ?
                     """,
                     (
@@ -110,12 +143,37 @@ class MemoryStore:
                         int(memory.is_core),
                         int(memory.archived),
                         memory.updated_at,
+                        memory.category,
+                        memory.importance,
+                        memory.last_used_at,
+                        memory.use_count,
+                        memory.expires_at,
+                        memory.topic_key,
+                        memory.source,
                         memory.id,
                     ),
                 )
             return cursor.rowcount > 0
         except sqlite3.Error as exc:
             raise MemoryStorageError(f"无法更新记忆：{exc}") from exc
+
+    @staticmethod
+    def _record_values(memory: MemoryRecord) -> tuple[object, ...]:
+        return (
+            memory.id,
+            memory.content,
+            int(memory.is_core),
+            int(memory.archived),
+            memory.created_at,
+            memory.updated_at,
+            memory.category,
+            memory.importance,
+            memory.last_used_at,
+            memory.use_count,
+            memory.expires_at,
+            memory.topic_key,
+            memory.source,
+        )
 
     def delete(self, memory_id: str) -> bool:
         try:
@@ -180,6 +238,25 @@ class MemoryStore:
         except sqlite3.Error as exc:
             raise MemoryStorageError(f"无法搜索记忆：{exc}") from exc
         return tuple(MemoryRecord.from_row(row) for row in rows)
+
+    def mark_used(self, memory_ids: tuple[str, ...], used_at: str) -> int:
+        identifiers = tuple(dict.fromkeys(memory_ids))
+        if not identifiers:
+            return 0
+        try:
+            with self._connection:
+                before = self._connection.total_changes
+                self._connection.executemany(
+                    """
+                    UPDATE memories
+                    SET last_used_at = ?, use_count = use_count + 1
+                    WHERE id = ? AND archived = 0
+                    """,
+                    ((used_at, memory_id) for memory_id in identifiers),
+                )
+                return self._connection.total_changes - before
+        except sqlite3.Error as exc:
+            raise MemoryStorageError(f"无法更新记忆使用信息：{exc}") from exc
 
     def close(self) -> None:
         if self._closed:

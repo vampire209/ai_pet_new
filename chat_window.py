@@ -53,6 +53,7 @@ from ai.persona_builder import PersonaBuilder
 from ai.profile import DEFAULT_PET_NAME, PetProfile
 from ai.profile_service import ProfileService
 from models.task import TaskDataError
+from memory.memory_service import MemoryService
 from todo_manager import TodoManager, TodoStorageError
 from ui_resources import (
     UI_ASSETS,
@@ -450,14 +451,18 @@ class ChatWindow(QWidget):
         ui_settings: ChatUiSettings | None = None,
         profile_service: ProfileService | None = None,
         persona_builder: PersonaBuilder | None = None,
+        memory_service: MemoryService | None = None,
     ) -> None:
         super().__init__(parent)
-        self._service = service or ChatService()
+        self._service = service or ChatService(memory_service=memory_service)
+        if service is not None and memory_service is not None:
+            self._service.set_memory_service(memory_service)
         self._todo_manager = todo_manager
         self._action_router = action_router or ChatActionRouter()
         self._thread_pool = thread_pool or QThreadPool.globalInstance()
         self._ui_settings = ui_settings or ChatUiSettings()
         self._profile_service = profile_service
+        self._memory_service = memory_service
         self._persona_builder = persona_builder or PersonaBuilder()
         self._pet_name = DEFAULT_PET_NAME
         if profile_service is not None:
@@ -1150,6 +1155,10 @@ class ChatWindow(QWidget):
     @property
     def profile_service(self) -> ProfileService | None:
         return self._profile_service
+
+    @property
+    def memory_service(self) -> MemoryService | None:
+        return self._memory_service
 
     @property
     def pet_name(self) -> str:

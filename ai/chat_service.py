@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
+import logging
 from threading import Event
 from typing import Any
 
 from ai.ai_config import DeepSeekConfig
 from ai.deepseek_client import DeepSeekClient, MissingAPIKeyError
 from ai.persona import DEFAULT_SYSTEM_PROMPT
+from memory.memory_models import MemoryDataError, MemoryRecord
+from memory.memory_retriever import MemoryContext, MemoryRetriever
+from memory.memory_service import MemoryService
+from memory.memory_store import MemoryStorageError
 
 
 class ChatBusyError(RuntimeError):
@@ -17,6 +22,9 @@ class ChatBusyError(RuntimeError):
 
 class EmptyChatMessageError(ValueError):
     """Raised for empty or whitespace-only user input."""
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class ChatService:
@@ -30,6 +38,8 @@ class ChatService:
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         system_prompt_provider: Callable[[], str] | None = None,
         max_context_rounds: int | None = None,
+        memory_service: MemoryService | None = None,
+        memory_retriever: MemoryRetriever | None = None,
     ) -> None:
         self.config = config or DeepSeekConfig.from_environment()
         self.client = client or DeepSeekClient(self.config)
@@ -43,6 +53,13 @@ class ChatService:
         self.max_context_rounds = max(1, configured_rounds)
         self._history: list[dict[str, str]] = []
         self._pending_user: str | None = None
+        self._memory_service: MemoryService | None = None
+        self._memory_retriever: MemoryRetriever | None = None
+        self._last_memory_context = MemoryContext((), (), "")
+        self._last_memory_write: MemoryRecord | None = None
+        self._last_memory_error: str | None = None
+        if memory_service is not None:
+            self.set_memory_service(memory_service, retriever=memory_retriever)
 
     @property
     def is_configured(self) -> bool:
@@ -63,6 +80,22 @@ class ChatService:
             *self.history,
         )
 
+    @property
+    def memory_service(self) -> MemoryService | None:
+        return self._memory_service
+
+    @property
+    def last_memory_context(self) -> MemoryContext:
+        return self._last_memory_context
+
+    @property
+    def last_memory_write(self) -> MemoryRecord | None:
+        return self._last_memory_write
+
+    @property
+    def last_memory_error(self) -> str | None:
+        return self._last_memory_error
+
     def set_system_prompt(self, system_prompt: str) -> None:
         """Update only future requests; session history remains untouched."""
 
@@ -82,6 +115,24 @@ class ChatService:
             self.set_system_prompt(self._system_prompt_provider())
         return self.system_prompt
 
+    def set_memory_service(
+        self,
+        memory_service: MemoryService | None,
+        *,
+        retriever: MemoryRetriever | None = None,
+    ) -> None:
+        """Use one shared application MemoryService for all future turns."""
+
+        self._memory_service = memory_service
+        self._memory_retriever = (
+            None
+            if memory_service is None
+            else retriever or MemoryRetriever(memory_service)
+        )
+        self._last_memory_context = MemoryContext((), (), "")
+        self._last_memory_write = None
+        self._last_memory_error = None
+
     def begin_turn(self, user_text: str) -> tuple[dict[str, str], ...]:
         normalized = user_text.strip()
         if not normalized:
@@ -93,11 +144,54 @@ class ChatService:
                 "未配置 DeepSeek API Key，请先设置 DEEPSEEK_API_KEY。"
             )
         self.refresh_system_prompt()
+        self._process_user_memory(normalized)
+        request_system_prompt = self.system_prompt
+        memory_context = self._prepare_memory_context(normalized)
+        if memory_context.prompt:
+            request_system_prompt = (
+                f"{request_system_prompt}\n\n{memory_context.prompt}"
+            )
         self._pending_user = normalized
         return (
-            *self.messages,
+            {"role": "system", "content": request_system_prompt},
+            *self.history,
             {"role": "user", "content": normalized},
         )
+
+    def _process_user_memory(self, user_text: str) -> None:
+        """Run exactly once per accepted ordinary user turn, before streaming."""
+
+        self._last_memory_write = None
+        self._last_memory_error = None
+        if self._memory_service is None:
+            return
+        try:
+            self._last_memory_write = (
+                self._memory_service.capture_user_message(user_text)
+            )
+        except (MemoryDataError, MemoryStorageError) as exc:
+            self._last_memory_error = str(exc)
+            LOGGER.exception(
+                "自动记忆写入失败，数据库=%s：%s",
+                self._memory_service.db_path,
+                exc,
+            )
+
+    def _prepare_memory_context(self, user_text: str) -> MemoryContext:
+        if self._memory_service is None or self._memory_retriever is None:
+            self._last_memory_context = MemoryContext((), (), "")
+            return self._last_memory_context
+        try:
+            self._memory_service.run_maintenance()
+            self._last_memory_context = self._memory_retriever.retrieve(user_text)
+        except (MemoryDataError, MemoryStorageError) as exc:
+            LOGGER.exception(
+                "长期记忆上下文读取失败，数据库=%s：%s",
+                self._memory_service.db_path,
+                exc,
+            )
+            self._last_memory_context = MemoryContext((), (), "")
+        return self._last_memory_context
 
     def stream_response(
         self,

@@ -224,7 +224,9 @@ class MemoryManagerWindow(QWidget):
         self.title_label = QLabel("记忆管理")
         self.title_label.setObjectName("memoryWindowTitle")
         root.addWidget(self.title_label)
-        subtitle = QLabel("手动管理桌宠长期记住的内容；本阶段不会从聊天自动保存。")
+        subtitle = QLabel(
+            "管理桌宠的长期记忆。部分具有长期价值的聊天内容会自动保存为活跃记忆。"
+        )
         subtitle.setObjectName("memoryWindowSubtitle")
         subtitle.setWordWrap(True)
         root.addWidget(subtitle)

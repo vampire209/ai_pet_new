@@ -216,6 +216,7 @@ class PetWindow(QLabel):
                 self._chat_service or ChatService(),
                 todo_manager=self._todo_manager,
                 profile_service=self._profile_service,
+                memory_service=self._memory_service,
             )
         if self._chat_window.isMinimized():
             state = self._chat_window.windowState() & ~Qt.WindowState.WindowMinimized
