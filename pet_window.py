@@ -1,0 +1,287 @@
+"""Transparent desktop pet with todo and queued reminder integration."""
+
+from __future__ import annotations
+
+import sys
+
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtGui import (
+    QAction,
+    QCloseEvent,
+    QContextMenuEvent,
+    QMouseEvent,
+    QPixmap,
+    QScreen,
+    QShowEvent,
+)
+from PySide6.QtWidgets import QApplication, QLabel, QMenu, QMessageBox
+
+from animation_manager import AnimationManager
+from animation_state import AnimationStateController
+from config import AppConfig
+from models.reminder import Reminder
+from models.task import Task
+from reminder_dialog import ReminderDialog
+from reminder_manager import ReminderManager
+from todo_manager import TodoManager
+from todo_manager import TodoStorageError
+from todo_window import TodoWindow
+
+
+class PetWindow(QLabel):
+    """Frameless topmost pet with threshold-based left-button dragging."""
+
+    def __init__(
+        self,
+        config: AppConfig,
+        todo_manager: TodoManager,
+        reminder_manager: ReminderManager | None = None,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self._config = config
+        self._todo_manager = todo_manager
+        self._reminder_manager = reminder_manager or ReminderManager(todo_manager)
+        self._todo_window: TodoWindow | None = None
+        self._reminder_dialogs: dict[str, ReminderDialog] = {}
+        self._press_global: QPoint | None = None
+        self._drag_offset = QPoint()
+        self._dragging = False
+        self._screen_signal_connected = False
+
+        self._setup_window()
+
+        screen = QApplication.primaryScreen()
+        initial_dpr = screen.devicePixelRatio() if screen is not None else 1.0
+        self._animation_manager = AnimationManager(
+            config,
+            device_pixel_ratio=initial_dpr,
+            parent=self,
+        )
+        self._animation_manager.frame_changed.connect(self._show_frame)
+        self._state_controller = AnimationStateController(
+            self._animation_manager,
+            parent=self,
+        )
+        self._reminder_manager.reminder_ready.connect(self._on_reminder_due)
+        self._reminder_manager.scan_failed.connect(self._on_reminder_scan_failed)
+
+        if self._animation_manager.current_animation is None:
+            self._show_missing_asset_message()
+        self._set_initial_position()
+
+    def _setup_window(self) -> None:
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setAutoFillBackground(False)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setStyleSheet("background: transparent;")
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self.setToolTip("按住左键拖动，右键退出")
+
+    def _show_frame(self, pixmap: QPixmap) -> None:
+        if pixmap.isNull():
+            return
+        self.setText("")
+        self.setPixmap(pixmap)
+        logical_size = pixmap.deviceIndependentSize().toSize()
+        if not logical_size.isEmpty():
+            self.setFixedSize(logical_size)
+
+    def _show_missing_asset_message(self) -> None:
+        self.clear()
+        self.setText("桌宠 idle 素材缺失")
+        self.setStyleSheet(
+            "background: rgba(40, 40, 40, 190); color: white; "
+            "padding: 12px; border-radius: 8px;"
+        )
+        self.adjustSize()
+
+    def _set_initial_position(self) -> None:
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            return
+        available = screen.availableGeometry()
+        x = available.x() + available.width() - self.width() - self._config.margin_x
+        y = available.y() + available.height() - self.height() - self._config.margin_y
+        self.move(max(available.x(), x), max(available.y(), y))
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        handle = self.windowHandle()
+        if handle is not None and not self._screen_signal_connected:
+            handle.screenChanged.connect(self._on_screen_changed)
+            self._screen_signal_connected = True
+            self._on_screen_changed(handle.screen())
+
+    def _on_screen_changed(self, screen: QScreen | None) -> None:
+        if screen is not None:
+            self._animation_manager.set_device_pixel_ratio(screen.devicePixelRatio())
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() != Qt.MouseButton.LeftButton:
+            super().mousePressEvent(event)
+            return
+        self._press_global = event.globalPosition().toPoint()
+        self._drag_offset = self._press_global - self.pos()
+        self._dragging = False
+        event.accept()
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if (
+            self._press_global is None
+            or not (event.buttons() & Qt.MouseButton.LeftButton)
+        ):
+            super().mouseMoveEvent(event)
+            return
+
+        current_global = event.globalPosition().toPoint()
+        if not self._dragging:
+            distance = (current_global - self._press_global).manhattanLength()
+            threshold = QApplication.styleHints().startDragDistance()
+            if distance < threshold:
+                event.accept()
+                return
+            self._dragging = True
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            self._state_controller.set_moving(True)
+
+        self.move(current_global - self._drag_offset)
+        event.accept()
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if event.button() != Qt.MouseButton.LeftButton:
+            super().mouseReleaseEvent(event)
+            return
+        if self._dragging:
+            self._state_controller.set_moving(False)
+        self._dragging = False
+        self._press_global = None
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        event.accept()
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        if event.button() != Qt.MouseButton.LeftButton or self._dragging:
+            super().mouseDoubleClickEvent(event)
+            return
+        self._press_global = None
+        self._open_todo_window()
+        event.accept()
+
+    def _open_todo_window(self, task_id: str | None = None) -> None:
+        if self._todo_window is None:
+            self._todo_window = TodoWindow(self._todo_manager)
+        else:
+            self._todo_window.refresh_tasks()
+
+        if self._todo_window.isMinimized():
+            state = self._todo_window.windowState() & ~Qt.WindowState.WindowMinimized
+            self._todo_window.setWindowState(state | Qt.WindowState.WindowActive)
+        self._todo_window.show()
+        self._todo_window.raise_()
+        self._todo_window.activateWindow()
+
+    def _on_reminder_due(self, task: Task, reminder: Reminder) -> None:
+        existing = self._reminder_dialogs.get(reminder.id)
+        if existing is not None and existing.isVisible():
+            existing.raise_()
+            existing.activateWindow()
+            return
+
+        dialog = ReminderDialog(task, reminder)
+        dialog.view_requested.connect(self._view_reminder_task)
+        dialog.acknowledge_requested.connect(self._acknowledge_reminder)
+        dialog.finished.connect(
+            lambda _result, reminder_id=reminder.id: self._reminder_dialog_finished(
+                reminder_id
+            )
+        )
+        self._reminder_dialogs[reminder.id] = dialog
+        self._state_controller.set_reminding(True)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _view_reminder_task(self, task_id: str, _reminder_id: str) -> None:
+        self._open_todo_window(task_id)
+
+    def _acknowledge_reminder(self, task_id: str, reminder_id: str) -> None:
+        try:
+            self._todo_manager.acknowledge_reminder(task_id, reminder_id)
+        except TodoStorageError as exc:
+            QMessageBox.critical(None, "提醒保存失败", str(exc))
+            return
+        if self._todo_window is not None:
+            self._todo_window.refresh_tasks()
+
+    def _reminder_dialog_finished(self, reminder_id: str) -> None:
+        dialog = self._reminder_dialogs.pop(reminder_id, None)
+        if dialog is not None:
+            dialog.deleteLater()
+        self._state_controller.set_reminding(bool(self._reminder_dialogs))
+        self._reminder_manager.reminder_finished(reminder_id)
+
+    @staticmethod
+    def _on_reminder_scan_failed(message: str) -> None:
+        print(f"[提醒扫描失败] {message}", file=sys.stderr)
+
+    def contextMenuEvent(self, event: QContextMenuEvent) -> None:
+        menu = self._create_context_menu()
+        menu.exec(event.globalPos())
+        event.accept()
+
+    def _create_context_menu(self) -> QMenu:
+        menu = QMenu(self)
+        todo_action = QAction("打开待办", menu)
+        todo_action.triggered.connect(lambda _checked=False: self._open_todo_window())
+        menu.addAction(todo_action)
+        menu.addSeparator()
+
+        exit_action = QAction("退出", menu)
+        exit_action.triggered.connect(QApplication.instance().quit)
+        menu.addAction(exit_action)
+        return menu
+
+    def set_waiting(self, active: bool) -> None:
+        """Reserved integration point for a future task manager."""
+        self._state_controller.set_waiting(active)
+
+    def set_reminding(self, active: bool) -> None:
+        """Reserved integration point for a future reminder manager."""
+        self._state_controller.set_reminding(active)
+
+    @property
+    def animation_state(self) -> str:
+        return self._state_controller.current_state
+
+    @property
+    def current_animation(self) -> str | None:
+        return self._animation_manager.current_animation
+
+    @property
+    def current_frame_index(self) -> int:
+        return self._animation_manager.current_frame_index
+
+    @property
+    def todo_window(self) -> TodoWindow | None:
+        return self._todo_window
+
+    @property
+    def reminder_dialogs(self) -> tuple[ReminderDialog, ...]:
+        return tuple(self._reminder_dialogs.values())
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        self._animation_manager.stop()
+        self._reminder_manager.stop()
+        self._reminder_manager.clear_queue()
+        if self._todo_window is not None:
+            self._todo_window.hide()
+        for dialog in list(self._reminder_dialogs.values()):
+            dialog.close()
+        self._reminder_dialogs.clear()
+        super().closeEvent(event)

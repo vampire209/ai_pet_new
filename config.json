@@ -1,0 +1,9 @@
+{
+  "pet_height": 270,
+  "margin_x": 20,
+  "margin_y": 20,
+  "idle_interval_ms": 220,
+  "move_interval_ms": 150,
+  "wait_interval_ms": 260,
+  "remind_interval_ms": 180
+}
