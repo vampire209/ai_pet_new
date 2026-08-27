@@ -35,6 +35,8 @@ from models.recurrence import (
     WEEKDAY_OPTIONS,
 )
 from models.task import Task, TaskDataError, parse_local_datetime
+from natural_language_parser import NaturalLanguageParser, ParsedTask
+from quick_add_widget import QuickAddWidget
 from todo_manager import TodoManager, TodoStorageError
 
 
@@ -421,9 +423,15 @@ class TaskRow(QFrame):
 class TodoWindow(QWidget):
     """Display and edit tasks while delegating all persistence to TodoManager."""
 
-    def __init__(self, manager: TodoManager, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        manager: TodoManager,
+        parent: QWidget | None = None,
+        parser: NaturalLanguageParser | None = None,
+    ) -> None:
         super().__init__(parent)
         self._manager = manager
+        self._natural_language_parser = parser or NaturalLanguageParser()
         self._task_rows: dict[str, TaskRow] = {}
         self._setup_ui()
         self.refresh_tasks()
@@ -441,6 +449,10 @@ class TodoWindow(QWidget):
         title.setStyleSheet("font-size: 21px; font-weight: 600; color: #222222;")
         title.setMinimumHeight(34)
         root_layout.addWidget(title)
+
+        self._quick_add = QuickAddWidget(self._natural_language_parser)
+        self._quick_add.create_requested.connect(self._create_quick_task)
+        root_layout.addWidget(self._quick_add)
 
         scroll = QScrollArea()
         scroll.setObjectName("taskScrollArea")
@@ -609,6 +621,29 @@ class TodoWindow(QWidget):
             self._add_time_edit,
             _default_event_datetime(),
         )
+        self._status_label.clear()
+        self.refresh_tasks()
+
+    def _create_quick_task(self, parsed: ParsedTask) -> None:
+        current = self._natural_language_parser.now()
+        if parsed.due_at is None or parsed.due_at <= current:
+            self._quick_add.show_creation_error(
+                "预览时间已经过去，请重新解析后再创建。"
+            )
+            return
+        try:
+            self._manager.add_task(
+                parsed.title,
+                parsed.due_at_iso,
+                parsed.advance_minutes,
+                parsed.repeat_type,
+                parsed.repeat_weekdays,
+                now=current,
+            )
+        except (ValueError, TodoStorageError) as exc:
+            self._quick_add.show_creation_error(str(exc))
+            return
+        self._quick_add.creation_succeeded(parsed.title)
         self._status_label.clear()
         self.refresh_tasks()
 

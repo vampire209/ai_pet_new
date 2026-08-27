@@ -10,6 +10,7 @@ import uuid
 
 REMINDER_OFFSET_OPTIONS: tuple[tuple[int, str], ...] = (
     (5, "提前5分钟"),
+    (10, "提前10分钟"),
     (30, "提前30分钟"),
     (60, "提前1小时"),
     (180, "提前3小时"),
