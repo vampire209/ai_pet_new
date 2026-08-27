@@ -1,4 +1,4 @@
-"""Stable local CRUD and JSON persistence for Phase 5 tasks."""
+"""Stable local CRUD and JSON persistence for Todo tasks."""
 
 from __future__ import annotations
 
@@ -15,6 +15,8 @@ from models.task import Task, TaskDataError, new_task_id
 
 _EVENT_UNCHANGED = object()
 _OFFSETS_UNCHANGED = object()
+_REPEAT_TYPE_UNCHANGED = object()
+_REPEAT_WEEKDAYS_UNCHANGED = object()
 
 
 class TodoStorageError(RuntimeError):
@@ -141,10 +143,19 @@ class TodoManager:
         text: str,
         event_at: str | None = None,
         reminder_offsets: Iterable[int] | None = None,
+        repeat_type: str = "none",
+        repeat_weekdays: Iterable[int] | None = None,
         *,
         now: datetime | None = None,
     ) -> Task:
-        task = Task.create(text, event_at, reminder_offsets, now=now)
+        task = Task.create(
+            text,
+            event_at,
+            reminder_offsets,
+            repeat_type,
+            repeat_weekdays,
+            now=now,
+        )
         self._tasks.append(task)
         try:
             self._write_tasks(self._tasks)
@@ -160,6 +171,8 @@ class TodoManager:
         text: str,
         event_at: str | None | object = _EVENT_UNCHANGED,
         reminder_offsets: Iterable[int] | object = _OFFSETS_UNCHANGED,
+        repeat_type: str | object = _REPEAT_TYPE_UNCHANGED,
+        repeat_weekdays: Iterable[int] | object = _REPEAT_WEEKDAYS_UNCHANGED,
         *,
         now: datetime | None = None,
     ) -> Task | None:
@@ -167,7 +180,12 @@ class TodoManager:
         if index is None:
             return None
         previous = self._tasks[index]
-        if event_at is _EVENT_UNCHANGED and reminder_offsets is _OFFSETS_UNCHANGED:
+        if (
+            event_at is _EVENT_UNCHANGED
+            and reminder_offsets is _OFFSETS_UNCHANGED
+            and repeat_type is _REPEAT_TYPE_UNCHANGED
+            and repeat_weekdays is _REPEAT_WEEKDAYS_UNCHANGED
+        ):
             updated = previous.renamed(text)
         else:
             next_event = previous.event_at if event_at is _EVENT_UNCHANGED else event_at
@@ -176,7 +194,24 @@ class TodoManager:
                 if reminder_offsets is _OFFSETS_UNCHANGED
                 else reminder_offsets
             )
-            updated = previous.updated(text, next_event, next_offsets, now=now)
+            next_repeat_type = (
+                previous.repeat_type
+                if repeat_type is _REPEAT_TYPE_UNCHANGED
+                else repeat_type
+            )
+            next_repeat_weekdays = (
+                previous.repeat_weekdays
+                if repeat_weekdays is _REPEAT_WEEKDAYS_UNCHANGED
+                else repeat_weekdays
+            )
+            updated = previous.updated(
+                text,
+                next_event,
+                next_offsets,
+                next_repeat_type,
+                next_repeat_weekdays,
+                now=now,
+            )
         self._tasks[index] = updated
         try:
             self._write_tasks(self._tasks)
@@ -186,12 +221,17 @@ class TodoManager:
         self._notify_changed()
         return updated
 
-    def toggle_complete(self, task_id: str) -> Task | None:
+    def toggle_complete(
+        self,
+        task_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> Task | None:
         index = self._index_of(task_id)
         if index is None:
             return None
         previous = self._tasks[index]
-        updated = previous.toggled()
+        updated = previous.toggled(now=now)
         self._tasks[index] = updated
         try:
             self._write_tasks(self._tasks)
@@ -201,10 +241,16 @@ class TodoManager:
         self._notify_changed()
         return updated
 
-    def complete_task(self, task_id: str, *, now: datetime | None = None) -> Task | None:
+    def complete_task(
+        self,
+        task_id: str,
+        reminder_id: str | None = None,
+        *,
+        now: datetime | None = None,
+    ) -> Task | None:
         return self._replace_task(
             task_id,
-            lambda task: task.mark_completed(now=now),
+            lambda task: task.mark_completed(reminder_id, now=now),
         )
 
     def delete_task(self, task_id: str) -> bool:

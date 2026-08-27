@@ -1,7 +1,7 @@
 # AI 桌宠（新项目）
 
 这是与 `ai_pet_codex` 完全独立的 Windows / PySide6 新实现。当前完成至
-Phase 5，运行时不会读取旧项目路径。
+Phase 6，运行时不会读取旧项目路径。
 
 ## 桌宠功能
 
@@ -35,6 +35,18 @@ Phase 5，运行时不会读取旧项目路径。
 - bubble 结束后根据未来提醒恢复 wait 或 idle
 - 扫描不会重复创建 bubble，也不会反复重置 remind 动画
 
+## 每日与每周循环
+
+- 重复类型支持不重复、每天、每周
+- 每周按 ISO 星期编号保存：周一为 1，周日为 7，可多选
+- 循环任务完成仅结束当前 occurrence，并自动推进到下一次
+- 每日保持原始时刻；每周可靠处理跨周、跨月和跨年
+- 每个新周期重新生成 advance 与 final，旧周期提醒不会复活
+- snooze 只改变当前 occurrence 的下一次提示，不改变基础计划时间
+- 循环任务保存最近一次完成时间 `last_completed_at`
+- 启动时保留未完成且已过期的 final，不补发已经错过的 advance
+- 删除循环任务会同时移除当前、稍后和未来提醒
+
 ## 本地保存与兼容
 
 - 使用 `data/tasks.json` 本地持久化
@@ -42,6 +54,8 @@ Phase 5，运行时不会读取旧项目路径。
 - 缺失、空文件、损坏 JSON、缺少字段和旧空时间均安全处理
 - Phase 3 的 `reminder_triggered` / `reminder_acknowledged` 会自动迁移为 final Reminder
 - Phase 4 Reminder 缺少 `cancelled` 时自动按 `false` 加载
+- Phase 1–5 任务缺少 `repeat_type` 时自动按 `none` 加载
+- 缺失的 `repeat_weekdays` 与 `last_completed_at` 使用安全默认值
 - 时间保存为电脑本地的无时区 ISO 字符串
 
 ## 安装与运行
@@ -58,7 +72,7 @@ python main.py
 python main.py --smoke-test
 ```
 
-运行 Phase 1–5 全部自动化测试：
+运行 Phase 1–6 全部自动化测试：
 
 ```powershell
 python -m unittest discover -s tests -p "test_phase*.py" -v
@@ -78,7 +92,13 @@ Phase 5 可见交互测试（使用可控本地测试时钟）：
 python tests\live_phase5_interaction.py
 ```
 
-## Phase 5 数据格式
+Phase 6 可控本地时间循环交互测试：
+
+```powershell
+python tests\live_phase6_recurrence.py
+```
+
+## Phase 6 数据格式
 
 ```json
 [
@@ -89,6 +109,9 @@ python tests\live_phase5_interaction.py
     "created_at": "2026-08-27T09:00:00",
     "completed_at": null,
     "event_at": "2026-09-10T09:00:00",
+    "repeat_type": "weekly",
+    "repeat_weekdays": [1, 3, 5],
+    "last_completed_at": null,
     "reminder_offsets": [60, 1440],
     "reminders": [
       {
@@ -139,4 +162,4 @@ python tests\live_phase5_interaction.py
 - `assets/animations/remind/frame_01.png` 至 `frame_08.png`
 
 `remind` 使用用户提供的现有素材，没有重新生成。当前没有 `wait` 素材，因此
-wait 状态会安全显示 idle。每日/每周任务、AI/API 和云同步尚未实现。
+wait 状态会安全显示 idle。AI/API 和云同步尚未实现。

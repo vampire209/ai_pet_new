@@ -233,6 +233,7 @@ class PetWindow(QLabel):
         try:
             self._todo_manager.complete_task(
                 task_id,
+                reminder_id,
                 now=self._reminder_manager.now(),
             )
         except TodoStorageError as exc:

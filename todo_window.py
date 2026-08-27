@@ -8,6 +8,7 @@ from PySide6.QtCore import QDate, QTime, Qt, Signal
 from PySide6.QtGui import QCloseEvent, QFont
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDateEdit,
     QDialog,
     QDialogButtonBox,
@@ -26,6 +27,13 @@ from PySide6.QtWidgets import (
 )
 
 from models.reminder import REMINDER_OFFSET_OPTIONS, OFFSET_LABELS
+from models.recurrence import (
+    REPEAT_DAILY,
+    REPEAT_NONE,
+    REPEAT_OPTIONS,
+    REPEAT_WEEKLY,
+    WEEKDAY_OPTIONS,
+)
 from models.task import Task, TaskDataError, parse_local_datetime
 from todo_manager import TodoManager, TodoStorageError
 
@@ -62,6 +70,23 @@ def format_event_time(event_at: str | None) -> str:
         f"{event.year}年{event.month:02d}月{event.day:02d}日 "
         f"{event.hour:02d}:{event.minute:02d}"
     )
+
+
+def format_task_schedule(task: Task) -> str:
+    event = parse_local_datetime(task.event_at)
+    if event is None:
+        return ""
+    if task.repeat_type == REPEAT_DAILY:
+        return f"每天 · {event.hour:02d}:{event.minute:02d}"
+    if task.repeat_type == REPEAT_WEEKLY:
+        labels = dict(WEEKDAY_OPTIONS)
+        days = chr(12289).join(
+            labels[weekday]
+            for weekday in task.repeat_weekdays
+            if weekday in labels
+        )
+        return f"每{days} · {event.hour:02d}:{event.minute:02d}"
+    return format_event_time(task.event_at)
 
 
 def format_reminder_summary(offsets: tuple[int, ...]) -> str:
@@ -126,14 +151,66 @@ def _selected_offsets(checks: dict[int, QCheckBox]) -> tuple[int, ...]:
     )
 
 
+def _create_recurrence_selector(
+    object_prefix: str,
+) -> tuple[QWidget, QComboBox, dict[int, QCheckBox], QWidget]:
+    container = QWidget()
+    layout = QVBoxLayout(container)
+    layout.setContentsMargins(0, 4, 0, 0)
+    layout.setSpacing(6)
+
+    repeat_layout = QHBoxLayout()
+    repeat_layout.setContentsMargins(0, 0, 0, 0)
+    repeat_layout.addWidget(QLabel("重复："))
+    combo = QComboBox()
+    combo.setObjectName(f"{object_prefix}RepeatType")
+    combo.setMinimumHeight(34)
+    for value, label in REPEAT_OPTIONS:
+        combo.addItem(label, value)
+    repeat_layout.addWidget(combo)
+    repeat_layout.addStretch(1)
+    layout.addLayout(repeat_layout)
+
+    weekday_frame = QWidget()
+    weekday_frame.setObjectName(f"{object_prefix}WeekdayFrame")
+    weekday_layout = QHBoxLayout(weekday_frame)
+    weekday_layout.setContentsMargins(0, 0, 0, 0)
+    weekday_layout.setSpacing(8)
+    weekday_layout.addWidget(QLabel("星期："))
+    checks: dict[int, QCheckBox] = {}
+    for weekday, label in WEEKDAY_OPTIONS:
+        checkbox = QCheckBox(label)
+        checkbox.setObjectName(f"{object_prefix}Weekday{weekday}")
+        checkbox.setMinimumHeight(28)
+        weekday_layout.addWidget(checkbox)
+        checks[weekday] = checkbox
+    weekday_layout.addStretch(1)
+    layout.addWidget(weekday_frame)
+
+    def update_weekday_visibility(_index: int = 0) -> None:
+        weekday_frame.setVisible(combo.currentData() == REPEAT_WEEKLY)
+
+    combo.currentIndexChanged.connect(update_weekday_visibility)
+    update_weekday_visibility()
+    return container, combo, checks, weekday_frame
+
+
+def _selected_weekdays(checks: dict[int, QCheckBox]) -> tuple[int, ...]:
+    return tuple(
+        weekday
+        for weekday, _label in WEEKDAY_OPTIONS
+        if checks[weekday].isChecked()
+    )
+
+
 class TaskEditDialog(QDialog):
-    """Edit task text and its optional one-time local event."""
+    """Edit task text, local event, reminders, and recurrence."""
 
     def __init__(self, task: Task, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._task = task
         self.setWindowTitle("编辑待办")
-        self.setMinimumSize(560, 430)
+        self.setMinimumSize(600, 560)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 18, 18, 18)
@@ -175,6 +252,13 @@ class TaskEditDialog(QDialog):
         time_layout.addLayout(date_time_layout)
         reminder_selector, self.reminder_checks = _create_reminder_selector("edit")
         time_layout.addWidget(reminder_selector)
+        (
+            recurrence_selector,
+            self.repeat_combo,
+            self.weekday_checks,
+            self.weekday_frame,
+        ) = _create_recurrence_selector("edit")
+        time_layout.addWidget(recurrence_selector)
         layout.addWidget(self.time_frame)
 
         existing = parse_local_datetime(task.event_at)
@@ -188,6 +272,13 @@ class TaskEditDialog(QDialog):
             checkbox = self.reminder_checks.get(offset)
             if checkbox is not None:
                 checkbox.setChecked(True)
+        repeat_index = self.repeat_combo.findData(task.repeat_type)
+        self.repeat_combo.setCurrentIndex(max(0, repeat_index))
+        for weekday in task.repeat_weekdays:
+            checkbox = self.weekday_checks.get(weekday)
+            if checkbox is not None:
+                checkbox.setChecked(True)
+        self.weekday_frame.setVisible(task.repeat_type == REPEAT_WEEKLY)
         self.time_frame.setVisible(existing is not None)
         self.time_checkbox.toggled.connect(self.time_frame.setVisible)
 
@@ -199,17 +290,29 @@ class TaskEditDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
-    def get_values(self) -> tuple[str, str | None, tuple[int, ...]]:
+    def get_values(
+        self,
+    ) -> tuple[str, str | None, tuple[int, ...], str, tuple[int, ...]]:
         event_at = (
             _editors_to_iso(self.date_edit, self.time_edit)
             if self.time_checkbox.isChecked()
             else None
         )
         offsets = _selected_offsets(self.reminder_checks) if event_at is not None else ()
-        return self.text_input.text().strip(), event_at, offsets
+        repeat_type = (
+            str(self.repeat_combo.currentData())
+            if event_at is not None
+            else REPEAT_NONE
+        )
+        weekdays = (
+            _selected_weekdays(self.weekday_checks)
+            if repeat_type == REPEAT_WEEKLY
+            else ()
+        )
+        return self.text_input.text().strip(), event_at, offsets, repeat_type, weekdays
 
     def _accept_if_valid(self) -> None:
-        text, event_at, _offsets = self.get_values()
+        text, event_at, _offsets, repeat_type, weekdays = self.get_values()
         if not text:
             QMessageBox.warning(self, "内容为空", "待办内容不能为空。")
             return
@@ -220,6 +323,9 @@ class TaskEditDialog(QDialog):
             and event <= datetime.now()
         ):
             QMessageBox.warning(self, "时间无效", "提醒时间必须晚于当前时间。")
+            return
+        if repeat_type == REPEAT_WEEKLY and not weekdays:
+            QMessageBox.warning(self, "重复设置无效", "每周重复至少选择一个星期。")
             return
         self.accept()
 
@@ -271,7 +377,17 @@ class TaskRow(QFrame):
         self.checkbox.toggled.connect(lambda _checked: self.toggle_requested.emit(self.task_id))
         text_layout.addWidget(self.checkbox)
 
-        formatted_time = format_event_time(task.event_at)
+        snooze_status = format_snooze_status(task)
+        if snooze_status:
+            snooze_label = QLabel(snooze_status)
+            snooze_label.setObjectName("snoozeStatusLabel")
+            snooze_label.setStyleSheet(
+                "color: #b05a16; font-size: 12px; padding-left: 24px;"
+            )
+            snooze_label.setMinimumHeight(22)
+            text_layout.addWidget(snooze_label)
+
+        formatted_time = format_task_schedule(task)
         if formatted_time:
             event_label = QLabel(formatted_time)
             event_label.setObjectName("eventTimeLabel")
@@ -288,15 +404,6 @@ class TaskRow(QFrame):
                 )
                 reminder_label.setMinimumHeight(22)
                 text_layout.addWidget(reminder_label)
-        snooze_status = format_snooze_status(task)
-        if snooze_status:
-            snooze_label = QLabel(snooze_status)
-            snooze_label.setObjectName("snoozeStatusLabel")
-            snooze_label.setStyleSheet(
-                "color: #b05a16; font-size: 12px; padding-left: 24px;"
-            )
-            snooze_label.setMinimumHeight(22)
-            text_layout.addWidget(snooze_label)
         layout.addWidget(text_container, 1)
 
         edit_button = QPushButton("编辑")
@@ -323,8 +430,8 @@ class TodoWindow(QWidget):
 
     def _setup_ui(self) -> None:
         self.setWindowTitle("我的待办")
-        self.setMinimumSize(580, 560)
-        self.resize(680, 700)
+        self.setMinimumSize(620, 620)
+        self.resize(700, 780)
 
         root_layout = QVBoxLayout(self)
         root_layout.setContentsMargins(18, 18, 18, 18)
@@ -401,6 +508,13 @@ class TodoWindow(QWidget):
         add_time_layout.addLayout(add_date_time_layout)
         add_selector, self._add_reminder_checks = _create_reminder_selector("add")
         add_time_layout.addWidget(add_selector)
+        (
+            recurrence_selector,
+            self._add_repeat_combo,
+            self._add_weekday_checks,
+            self._add_weekday_frame,
+        ) = _create_recurrence_selector("add")
+        add_time_layout.addWidget(recurrence_selector)
         root_layout.addWidget(self._add_time_frame)
         _set_editors(
             self._add_date_edit,
@@ -455,18 +569,40 @@ class TodoWindow(QWidget):
             if event_at is not None
             else ()
         )
+        repeat_type = (
+            str(self._add_repeat_combo.currentData())
+            if event_at is not None
+            else REPEAT_NONE
+        )
+        repeat_weekdays = (
+            _selected_weekdays(self._add_weekday_checks)
+            if repeat_type == REPEAT_WEEKLY
+            else ()
+        )
         event = parse_local_datetime(event_at)
         if event is not None and event <= datetime.now():
             QMessageBox.warning(self, "时间无效", "提醒时间必须晚于当前时间。")
             return
+        if repeat_type == REPEAT_WEEKLY and not repeat_weekdays:
+            QMessageBox.warning(self, "重复设置无效", "每周重复至少选择一个星期。")
+            return
         try:
-            self._manager.add_task(text, event_at, reminder_offsets)
+            self._manager.add_task(
+                text,
+                event_at,
+                reminder_offsets,
+                repeat_type,
+                repeat_weekdays,
+            )
         except (TaskDataError, TodoStorageError) as exc:
             self._show_error(str(exc))
             return
         self._task_input.clear()
         self._add_time_checkbox.setChecked(False)
         for checkbox in self._add_reminder_checks.values():
+            checkbox.setChecked(False)
+        self._add_repeat_combo.setCurrentIndex(0)
+        for checkbox in self._add_weekday_checks.values():
             checkbox.setChecked(False)
         _set_editors(
             self._add_date_edit,
@@ -487,15 +623,27 @@ class TodoWindow(QWidget):
         if len(values) == 2:
             text, event_at = values
             reminder_offsets = task.reminder_offsets if event_at == task.event_at else ()
-        else:
+        elif len(values) == 3:
             text, event_at, reminder_offsets = values
+        else:
+            text, event_at, reminder_offsets, repeat_type, repeat_weekdays = values
         try:
-            self._manager.update_task(
-                task_id,
-                text,
-                event_at,
-                reminder_offsets,
-            )
+            if len(values) < 5:
+                self._manager.update_task(
+                    task_id,
+                    text,
+                    event_at,
+                    reminder_offsets,
+                )
+            else:
+                self._manager.update_task(
+                    task_id,
+                    text,
+                    event_at,
+                    reminder_offsets,
+                    repeat_type,
+                    repeat_weekdays,
+                )
         except (TaskDataError, TodoStorageError) as exc:
             self._show_error(str(exc))
             return
