@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Iterable
 import uuid
 
@@ -11,6 +11,7 @@ from models.reminder import (
     Reminder,
     ReminderDataError,
     ReminderGenerator,
+    SNOOZE_MINUTES,
     normalize_reminder_offsets,
 )
 
@@ -151,6 +152,7 @@ class Task:
                 offsets,
                 existing=parsed_reminders,
                 now=now or datetime.now(),
+                preserve_snoozes=True,
             )
 
         return cls(
@@ -242,7 +244,18 @@ class Task:
     def toggled(self) -> "Task":
         if self.completed:
             return replace(self, completed=False, completed_at=None)
-        return replace(self, completed=True, completed_at=local_now_iso())
+        return self.mark_completed()
+
+    def mark_completed(self, *, now: datetime | None = None) -> "Task":
+        if self.completed:
+            return self
+        completed_time = now or datetime.now()
+        return replace(
+            self,
+            completed=True,
+            completed_at=completed_time.isoformat(timespec="seconds"),
+            reminders=tuple(reminder.cancel() for reminder in self.reminders),
+        )
 
     def with_reminder_triggered(self, reminder_id: str | None = None) -> "Task":
         target_id = reminder_id
@@ -273,6 +286,31 @@ class Task:
                 for reminder in self.reminders
             ),
         )
+
+    def snoozed(
+        self,
+        reminder_id: str,
+        minutes: int,
+        *,
+        now: datetime | None = None,
+    ) -> "Task":
+        if minutes not in SNOOZE_MINUTES:
+            raise TaskDataError(f"不支持稍后 {minutes} 分钟")
+        current = self.get_reminder(reminder_id)
+        if (
+            self.completed
+            or current is None
+            or not current.triggered
+            or current.acknowledged
+        ):
+            return self
+        acknowledged = tuple(
+            reminder.acknowledge() if reminder.id == reminder_id else reminder
+            for reminder in self.reminders
+        )
+        trigger_at = (now or datetime.now()) + timedelta(minutes=minutes)
+        snooze = Reminder.create("snooze", minutes, trigger_at)
+        return replace(self, reminders=acknowledged + (snooze,))
 
     def with_id(self, task_id: str) -> "Task":
         return replace(self, id=task_id)

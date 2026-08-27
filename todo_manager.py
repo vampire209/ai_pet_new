@@ -1,4 +1,4 @@
-"""Stable local CRUD and JSON persistence for Phase 4 tasks."""
+"""Stable local CRUD and JSON persistence for Phase 5 tasks."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import sys
 from datetime import datetime
-from typing import Iterable
+from typing import Callable, Iterable
 
 from config import PROJECT_ROOT
 from models.task import Task, TaskDataError, new_task_id
@@ -27,6 +27,7 @@ class TodoManager:
     def __init__(self, data_path: Path | str | None = None) -> None:
         self._data_path = Path(data_path) if data_path else PROJECT_ROOT / "data" / "tasks.json"
         self._tasks: list[Task] = []
+        self._change_listeners: list[Callable[[], None]] = []
         self._initialize_storage()
         self._load()
 
@@ -120,6 +121,21 @@ class TodoManager:
     def get_task(self, task_id: str) -> Task | None:
         return next((task for task in self._tasks if task.id == task_id), None)
 
+    def subscribe(self, listener: Callable[[], None]) -> None:
+        if listener not in self._change_listeners:
+            self._change_listeners.append(listener)
+
+    def unsubscribe(self, listener: Callable[[], None]) -> None:
+        if listener in self._change_listeners:
+            self._change_listeners.remove(listener)
+
+    def _notify_changed(self) -> None:
+        for listener in tuple(self._change_listeners):
+            try:
+                listener()
+            except Exception as exc:
+                self._warn(f"任务变更监听器执行失败：{exc}")
+
     def add_task(
         self,
         text: str,
@@ -135,6 +151,7 @@ class TodoManager:
         except TodoStorageError:
             self._tasks.pop()
             raise
+        self._notify_changed()
         return task
 
     def update_task(
@@ -166,6 +183,7 @@ class TodoManager:
         except TodoStorageError:
             self._tasks[index] = previous
             raise
+        self._notify_changed()
         return updated
 
     def toggle_complete(self, task_id: str) -> Task | None:
@@ -180,7 +198,14 @@ class TodoManager:
         except TodoStorageError:
             self._tasks[index] = previous
             raise
+        self._notify_changed()
         return updated
+
+    def complete_task(self, task_id: str, *, now: datetime | None = None) -> Task | None:
+        return self._replace_task(
+            task_id,
+            lambda task: task.mark_completed(now=now),
+        )
 
     def delete_task(self, task_id: str) -> bool:
         index = self._index_of(task_id)
@@ -192,6 +217,7 @@ class TodoManager:
         except TodoStorageError:
             self._tasks.insert(index, removed)
             raise
+        self._notify_changed()
         return True
 
     def mark_reminder_triggered(
@@ -214,18 +240,34 @@ class TodoManager:
             lambda task: task.with_reminder_acknowledged(reminder_id),
         )
 
+    def snooze_reminder(
+        self,
+        task_id: str,
+        reminder_id: str,
+        minutes: int,
+        *,
+        now: datetime | None = None,
+    ) -> Task | None:
+        return self._replace_task(
+            task_id,
+            lambda task: task.snoozed(reminder_id, minutes, now=now),
+        )
+
     def _replace_task(self, task_id: str, transform) -> Task | None:
         index = self._index_of(task_id)
         if index is None:
             return None
         previous = self._tasks[index]
         updated = transform(previous)
+        if updated == previous:
+            return previous
         self._tasks[index] = updated
         try:
             self._write_tasks(self._tasks)
         except TodoStorageError:
             self._tasks[index] = previous
             raise
+        self._notify_changed()
         return updated
 
     def _index_of(self, task_id: str) -> int | None:

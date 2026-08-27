@@ -21,6 +21,8 @@ class ReminderManager(QObject):
     reminder_due = Signal(object)
     reminder_ready = Signal(object, object)
     scan_failed = Signal(str)
+    waiting_changed = Signal(bool)
+    active_invalidated = Signal(str)
 
     def __init__(
         self,
@@ -36,28 +38,37 @@ class ReminderManager(QObject):
         self._pending_reminders: deque[tuple[str, str]] = deque()
         self._queued_ids: set[str] = set()
         self._active_reminder_id: str | None = None
+        self._active_task_id: str | None = None
+        self._waiting_state: bool | None = None
         self._timer = QTimer(self)
         self._timer.setInterval(max(100, int(interval_ms)))
         self._timer.timeout.connect(self.check_now)
+        self._todo_manager.subscribe(self._on_tasks_changed)
 
     def start(self, *, immediate: bool = True) -> None:
         if not self._timer.isActive():
             self._timer.start()
         if immediate:
             QTimer.singleShot(0, self.check_now)
+        else:
+            self.refresh_waiting_state()
 
     def stop(self) -> None:
         self._timer.stop()
 
+    def now(self) -> datetime:
+        return self._now_provider()
+
     def check_now(self) -> None:
         now = self._now_provider()
         for task in self._todo_manager.get_tasks():
-            if task.completed or task.event_at is None:
+            if task.completed:
                 continue
             for reminder in task.reminders:
                 trigger_at = reminder.trigger_datetime
                 if (
                     reminder.triggered
+                    or reminder.cancelled
                     or reminder.id in self._queued_ids
                     or trigger_at is None
                     or now < trigger_at
@@ -66,6 +77,7 @@ class ReminderManager(QObject):
                 self._pending_reminders.append((task.id, reminder.id))
                 self._queued_ids.add(reminder.id)
         self._dispatch_next()
+        self.refresh_waiting_state(now=now)
 
     def _dispatch_next(self) -> None:
         if self._active_reminder_id is not None:
@@ -74,7 +86,13 @@ class ReminderManager(QObject):
             task_id, reminder_id = self._pending_reminders.popleft()
             task = self._todo_manager.get_task(task_id)
             reminder = task.get_reminder(reminder_id) if task is not None else None
-            if task is None or task.completed or reminder is None or reminder.triggered:
+            if (
+                task is None
+                or task.completed
+                or reminder is None
+                or reminder.triggered
+                or reminder.cancelled
+            ):
                 self._queued_ids.discard(reminder_id)
                 continue
             try:
@@ -94,6 +112,7 @@ class ReminderManager(QObject):
                 self._queued_ids.discard(reminder_id)
                 continue
             self._active_reminder_id = reminder_id
+            self._active_task_id = task_id
             self.reminder_ready.emit(updated_task, updated_reminder)
             self.reminder_due.emit(updated_task)
             return
@@ -103,12 +122,89 @@ class ReminderManager(QObject):
             return
         self._queued_ids.discard(reminder_id)
         self._active_reminder_id = None
-        QTimer.singleShot(0, self._dispatch_next)
+        self._active_task_id = None
+        self._dispatch_next()
+        self.refresh_waiting_state()
 
     def clear_queue(self) -> None:
         self._pending_reminders.clear()
         self._queued_ids.clear()
         self._active_reminder_id = None
+        self._active_task_id = None
+
+    def _on_tasks_changed(self) -> None:
+        self._prune_pending()
+        invalidated_id: str | None = None
+        if self._active_reminder_id is not None:
+            task = self._todo_manager.get_task(self._active_task_id or "")
+            reminder = (
+                task.get_reminder(self._active_reminder_id)
+                if task is not None
+                else None
+            )
+            if (
+                task is None
+                or task.completed
+                or reminder is None
+                or reminder.cancelled
+            ):
+                invalidated_id = self._active_reminder_id
+                self._queued_ids.discard(invalidated_id)
+                self._active_reminder_id = None
+                self._active_task_id = None
+        self.refresh_waiting_state()
+        if invalidated_id is not None:
+            self.active_invalidated.emit(invalidated_id)
+            self._dispatch_next()
+
+    def _prune_pending(self) -> None:
+        now = self._now_provider()
+        retained: deque[tuple[str, str]] = deque()
+        for task_id, reminder_id in self._pending_reminders:
+            task = self._todo_manager.get_task(task_id)
+            reminder = task.get_reminder(reminder_id) if task is not None else None
+            trigger_at = reminder.trigger_datetime if reminder is not None else None
+            if (
+                task is not None
+                and not task.completed
+                and reminder is not None
+                and not reminder.triggered
+                and not reminder.cancelled
+                and trigger_at is not None
+                and trigger_at <= now
+            ):
+                retained.append((task_id, reminder_id))
+            else:
+                self._queued_ids.discard(reminder_id)
+        self._pending_reminders = retained
+
+    def has_future_reminders(self, *, now: datetime | None = None) -> bool:
+        current = now or self._now_provider()
+        for task in self._todo_manager.get_tasks():
+            if task.completed:
+                continue
+            for reminder in task.reminders:
+                trigger_at = reminder.trigger_datetime
+                if (
+                    not reminder.triggered
+                    and not reminder.cancelled
+                    and trigger_at is not None
+                    and trigger_at > current
+                ):
+                    return True
+        return False
+
+    def refresh_waiting_state(
+        self,
+        *,
+        now: datetime | None = None,
+        force: bool = False,
+    ) -> bool:
+        waiting = self.has_future_reminders(now=now)
+        if force or waiting != self._waiting_state:
+            self._waiting_state = waiting
+            self.waiting_changed.emit(waiting)
+        return waiting
 
     @property
     def pending_reminders(self) -> tuple[tuple[str, str], ...]:
@@ -117,6 +213,12 @@ class ReminderManager(QObject):
     @property
     def active_reminder_id(self) -> str | None:
         return self._active_reminder_id
+
+    @property
+    def waiting_state(self) -> bool:
+        if self._waiting_state is None:
+            return self.refresh_waiting_state()
+        return self._waiting_state
 
     @property
     def is_active(self) -> bool:

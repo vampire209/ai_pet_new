@@ -21,6 +21,7 @@ REMINDER_OFFSET_OPTIONS: tuple[tuple[int, str], ...] = (
 )
 SUPPORTED_OFFSETS = tuple(value for value, _label in REMINDER_OFFSET_OPTIONS)
 OFFSET_LABELS = dict(REMINDER_OFFSET_OPTIONS)
+SNOOZE_MINUTES: tuple[int, ...] = (5, 10, 30, 60)
 
 
 class ReminderDataError(ValueError):
@@ -75,6 +76,7 @@ def normalize_reminder_offsets(values: Any, *, strict: bool = False) -> tuple[in
 def format_offset_duration(offset_minutes: int) -> str:
     labels = {
         5: "5分钟",
+        10: "10分钟",
         30: "30分钟",
         60: "1小时",
         180: "3小时",
@@ -89,7 +91,7 @@ def format_offset_duration(offset_minutes: int) -> str:
 
 @dataclass(frozen=True, slots=True)
 class Reminder:
-    """One independently persisted advance or final reminder."""
+    """One independently persisted advance, final, or snooze reminder."""
 
     id: str
     type: str
@@ -97,6 +99,7 @@ class Reminder:
     trigger_at: str
     triggered: bool
     acknowledged: bool
+    cancelled: bool = False
 
     @property
     def trigger_datetime(self) -> datetime | None:
@@ -115,6 +118,7 @@ class Reminder:
             trigger_at=trigger_at.isoformat(timespec="seconds"),
             triggered=False,
             acknowledged=False,
+            cancelled=False,
         )
 
     @classmethod
@@ -122,7 +126,7 @@ class Reminder:
         if not isinstance(data, dict):
             raise ReminderDataError("提醒记录不是 JSON 对象")
         reminder_type = data.get("type")
-        if reminder_type not in {"advance", "final"}:
+        if reminder_type not in {"advance", "final", "snooze"}:
             raise ReminderDataError("提醒 type 无效")
         try:
             offset = int(data.get("offset_minutes", 0))
@@ -130,8 +134,10 @@ class Reminder:
             raise ReminderDataError("提醒 offset_minutes 无效") from exc
         if reminder_type == "final":
             offset = 0
-        elif offset not in SUPPORTED_OFFSETS:
+        elif reminder_type == "advance" and offset not in SUPPORTED_OFFSETS:
             raise ReminderDataError("提前提醒 offset_minutes 不受支持")
+        elif reminder_type == "snooze" and offset not in SNOOZE_MINUTES:
+            raise ReminderDataError("稍后提醒 offset_minutes 不受支持")
         trigger = _parse_local(data.get("trigger_at"))
         if trigger is None:
             raise ReminderDataError("提醒 trigger_at 无效")
@@ -139,6 +145,7 @@ class Reminder:
         reminder_id = raw_id.strip() if isinstance(raw_id, str) else ""
         acknowledged = _as_bool(data.get("acknowledged", False))
         triggered = _as_bool(data.get("triggered", False)) or acknowledged
+        cancelled = _as_bool(data.get("cancelled", False))
         return cls(
             id=reminder_id or new_reminder_id(),
             type=reminder_type,
@@ -146,10 +153,11 @@ class Reminder:
             trigger_at=trigger.isoformat(timespec="seconds"),
             triggered=triggered,
             acknowledged=acknowledged,
+            cancelled=cancelled,
         )
 
     def mark_triggered(self) -> "Reminder":
-        if self.triggered:
+        if self.triggered or self.cancelled:
             return self
         return replace(self, triggered=True, acknowledged=False)
 
@@ -157,6 +165,11 @@ class Reminder:
         if not self.triggered or self.acknowledged:
             return self
         return replace(self, acknowledged=True)
+
+    def cancel(self) -> "Reminder":
+        if self.triggered or self.cancelled:
+            return self
+        return replace(self, cancelled=True)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -166,6 +179,7 @@ class Reminder:
             "trigger_at": self.trigger_at,
             "triggered": self.triggered,
             "acknowledged": self.acknowledged,
+            "cancelled": self.cancelled,
         }
 
 
@@ -179,12 +193,18 @@ class ReminderGenerator:
         *,
         existing: Iterable[Reminder] = (),
         now: datetime | None = None,
+        preserve_snoozes: bool = False,
     ) -> tuple[Reminder, ...]:
         existing_items = tuple(existing)
         triggered_history = [item for item in existing_items if item.triggered]
+        pending_snoozes = [
+            item
+            for item in existing_items
+            if item.type == "snooze" and not item.triggered
+        ] if preserve_snoozes else []
         event = _parse_local(event_at)
         if event is None:
-            return tuple(triggered_history)
+            return tuple(triggered_history + pending_snoozes)
 
         specifications: list[tuple[str, int, datetime]] = []
         for offset in sorted(normalize_reminder_offsets(tuple(reminder_offsets)), reverse=True):
@@ -211,4 +231,4 @@ class ReminderGenerator:
         orphaned_history = [
             item for item in triggered_history if item.id not in configured_ids
         ]
-        return tuple(orphaned_history + configured)
+        return tuple(orphaned_history + pending_snoozes + configured)

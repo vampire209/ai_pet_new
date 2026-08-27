@@ -69,6 +69,30 @@ def format_reminder_summary(offsets: tuple[int, ...]) -> str:
     return f"提醒：{chr(12289).join(labels)}" if labels else ""
 
 
+def format_snooze_status(task: Task, *, now: datetime | None = None) -> str:
+    current = now or datetime.now()
+    upcoming = [
+        reminder.trigger_datetime
+        for reminder in task.reminders
+        if reminder.type == "snooze"
+        and not reminder.triggered
+        and not reminder.cancelled
+        and reminder.trigger_datetime is not None
+        and reminder.trigger_datetime > current
+    ]
+    if not upcoming:
+        return ""
+    trigger = min(upcoming)
+    if trigger.date() == current.date():
+        return f"稍后至 {trigger.hour:02d}:{trigger.minute:02d}"
+    if trigger.year == current.year:
+        return (
+            f"稍后至 {trigger.month:02d}月{trigger.day:02d}日 "
+            f"{trigger.hour:02d}:{trigger.minute:02d}"
+        )
+    return f"稍后至 {trigger:%Y-%m-%d %H:%M}"
+
+
 def _create_reminder_selector(
     object_prefix: str,
 ) -> tuple[QWidget, dict[int, QCheckBox]]:
@@ -264,6 +288,15 @@ class TaskRow(QFrame):
                 )
                 reminder_label.setMinimumHeight(22)
                 text_layout.addWidget(reminder_label)
+        snooze_status = format_snooze_status(task)
+        if snooze_status:
+            snooze_label = QLabel(snooze_status)
+            snooze_label.setObjectName("snoozeStatusLabel")
+            snooze_label.setStyleSheet(
+                "color: #b05a16; font-size: 12px; padding-left: 24px;"
+            )
+            snooze_label.setMinimumHeight(22)
+            text_layout.addWidget(snooze_label)
         layout.addWidget(text_container, 1)
 
         edit_button = QPushButton("编辑")
