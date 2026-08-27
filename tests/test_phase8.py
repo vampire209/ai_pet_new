@@ -201,7 +201,14 @@ class Phase8Tests(unittest.TestCase):
         messages = service.begin_turn("你好")
         self.assertEqual(messages[0]["role"], "system")
         self.assertEqual(messages[0]["content"], DEFAULT_SYSTEM_PROMPT)
-        self.assertIn("不能直接创建", messages[0]["content"])
+        self.assertIn("可以帮助用户创建", messages[0]["content"])
+        self.assertIn("一次性、每日、每周和提前提醒", messages[0]["content"])
+        self.assertIn("只有用户点击确认", messages[0]["content"])
+        self.assertIn("到时候会提醒你", messages[0]["content"])
+        self.assertIn("先让你确认再创建", messages[0]["content"])
+        self.assertIn("不能修改、删除或完成", messages[0]["content"])
+        self.assertIn("不能操作 Windows 系统提醒", messages[0]["content"])
+        self.assertNotIn("不能直接创建待办", messages[0]["content"])
         self.assertEqual(messages[-1], {"role": "user", "content": "你好"})
 
     def test_05_assistant_history_and_second_turn_include_prior_context(self) -> None:
@@ -333,7 +340,8 @@ class Phase8Tests(unittest.TestCase):
         self.assertTrue(
             wait_until(
                 lambda: len(window.message_texts) == 2
-                and window.message_texts[-1][1] not in {"", "…"},
+                and window.message_texts[-1][1]
+                not in {"", "…", "桌宠正在想……"},
                 self.app,
             )
         )
@@ -478,4 +486,6 @@ class Phase8Tests(unittest.TestCase):
             )
             self.assertEqual(created.text, "完成高数作业")
             self.assertEqual(created.reminder_offsets, (30,))
-            self.assertIn("不能直接创建", DEFAULT_SYSTEM_PROMPT)
+            self.assertIn("只有用户点击确认", DEFAULT_SYSTEM_PROMPT)
+            self.assertIn("绝不能跳过确认卡", DEFAULT_SYSTEM_PROMPT)
+            self.assertIn("不能修改、删除或完成", DEFAULT_SYSTEM_PROMPT)

@@ -64,7 +64,8 @@ class LivePhase8Probe:
         self.wait_for(
             lambda: self.window.is_generating
             and len(self.window.message_texts) == 2
-            and self.window.message_texts[-1][1] not in {"", "…", "你好呀"},
+            and self.window.message_texts[-1][1]
+            not in {"", "…", "桌宠正在想……", "你好呀"},
             self.finish_a,
             "场景 A：没有观察到逐块更新",
         )
@@ -120,7 +121,8 @@ class LivePhase8Probe:
         self.send("生成一段很长的回答")
         self.wait_for(
             lambda: self.window.is_generating
-            and self.window.message_texts[-1][1] not in {"", "…"},
+            and self.window.message_texts[-1][1]
+            not in {"", "…", "桌宠正在想……"},
             self.stop_c,
             "场景 C：停止前没有收到首个分块",
         )

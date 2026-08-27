@@ -1,7 +1,7 @@
 # AI 桌宠（新项目）
 
 这是与 `ai_pet_codex` 完全独立的 Windows / PySide6 新实现。当前完成至
-Phase 8，运行时不会读取旧项目路径。
+Phase 9，运行时不会读取旧项目路径。
 
 ## 桌宠功能
 
@@ -64,6 +64,10 @@ Phase 8，运行时不会读取旧项目路径。
 ## DeepSeek AI 聊天
 
 - “AI聊天”是独立普通窗口，关闭聊天不会退出桌宠或影响 Todo
+- 聊天面板使用浅蓝、淡紫和白色的桌宠风格，复用 idle 角色素材作为头像
+- 用户消息右对齐、桌宠消息左对齐，圆角气泡会随窗口宽度调整
+- 顶部以桌宠名称和回复状态为主，模型名称作为次要信息显示
+- 流式首个分块到达前显示“桌宠正在想……”，之后原位更新同一气泡
 - 使用 OpenAI 兼容 Python SDK 的 Chat Completions 流式接口
 - 默认地址为 `https://api.deepseek.com`
 - 默认模型为 `deepseek-v4-flash`，可切换为 `deepseek-v4-pro`
@@ -73,9 +77,24 @@ Phase 8，运行时不会读取旧项目路径。
 - 支持停止生成；停止后保留已经显示的内容并停止继续追加
 - 支持清空聊天，同时清除当前会话上下文并保留系统人格
 - 保留最近 20 轮上下文，旧轮次自动丢弃，系统人格始终保留
-- 聊天人格只提供聊天、解释和建议，不会直接修改 Todo 或提醒数据
+- 普通聊天由 DeepSeek 处理；明确的创建命令优先使用本地 Phase 7 解析器
 - 未配置 Key、认证、网络、超时、限流、额度、模型和服务错误都会安全显示
 - API Key 只从 `DEEPSEEK_API_KEY` 环境变量读取，不写入代码、配置或日志
+
+## 聊天中创建待办
+
+- 可以在 AI 聊天中输入“明天下午3点提醒我交作业”
+- 支持 Phase 7 已有的时间、提前提醒、每天和每周多星期表达
+- 创建命令完全走本地 `ChatActionRouter` 和 `NaturalLanguageParser`，不消耗 API
+- 即使没有 `DEEPSEEK_API_KEY` 或网络断开，仍能生成待办确认卡
+- 草案阶段不会写入 JSON，也不会生成 Reminder
+- 只有点击确认卡中的“确认创建”后，才调用现有 `TodoManager` 保存任务
+- 确认成功后正常生成 advance/final，并继续复用 daily/weekly recurrence
+- 点击“取消”不会创建任务或修改 JSON
+- 缺少具体时间时会提示重新输入完整句子，不会猜测默认时间
+- 真实创建成功结果会作为受控上下文加入聊天，模型不会凭空声称已执行
+- 清空聊天只清除聊天 UI 和上下文，不会删除已经创建的 Todo
+- 当前聊天操作只支持创建 Todo，不支持删除、修改或自动完成 Todo
 
 ## 本地保存与兼容
 
@@ -125,8 +144,8 @@ python main.py
 ```
 
 恢复默认模型可关闭当前 PowerShell 窗口，或移除本会话中的
-`DEEPSEEK_MODEL`。聊天不会自动创建、完成或删除待办，需要待办时请使用“我的
-待办”或其中的中文快速添加。
+`DEEPSEEK_MODEL`。聊天可以在本地生成待办确认卡，但不会静默创建；删除、修改
+和完成任务仍需在“我的待办”中操作。
 
 自动退出的启动冒烟检查：
 
@@ -134,7 +153,7 @@ python main.py
 python main.py --smoke-test
 ```
 
-运行 Phase 1–8 全部自动化测试：
+运行 Phase 1–9 全部自动化测试：
 
 ```powershell
 python -m unittest discover -s tests -p "test_phase*.py" -v
@@ -182,7 +201,22 @@ python tests\live_deepseek_api.py
 没有 Key 时该真实探针会打印 `REAL_SKIP` 并正常退出，不会自动读取任何密钥
 文件。自动化测试、smoke-test 和 Fake 联调都不会调用真实 API。
 
-## Phase 6–8 数据格式
+Phase 9 聊天创建待办可见联调（A–G 全部使用 Fake client 和临时 JSON）：
+
+```powershell
+python tests\live_phase9_chat_todo.py
+```
+
+Phase 9 人工验证：
+
+1. 右键桌宠打开“AI聊天”，输入“明天下午3点提醒我交作业，提前30分钟提醒”，
+   先检查确认卡，再点击“确认创建”，最后打开 Todo 检查任务及提醒。
+2. 输入“每天晚上8点提醒我背单词”，确认卡应显示每天，创建后应进入循环任务。
+3. 输入“你觉得今天适合学什么？”，应继续通过 DeepSeek 正常流式回答。
+4. 在新 PowerShell 中不设置 `DEEPSEEK_API_KEY` 并启动程序：本地待办命令仍可
+   创建确认卡和保存任务，普通聊天则显示未配置 Key。
+
+## Phase 6–9 数据格式
 
 ```json
 [

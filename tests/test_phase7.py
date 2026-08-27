@@ -83,11 +83,11 @@ class Phase7Tests(unittest.TestCase):
             "交报告",
         )
         samples = (
-            ("明天8点提醒我任务一", datetime(2026, 8, 28, 8, 0)),
-            ("明天8:30提醒我任务二", datetime(2026, 8, 28, 8, 30)),
-            ("明天8点30提醒我任务三", datetime(2026, 8, 28, 8, 30)),
-            ("明天八点提醒我任务四", datetime(2026, 8, 28, 8, 0)),
-            ("明天八点半提醒我任务五", datetime(2026, 8, 28, 8, 30)),
+            ("明天上午8点提醒我任务一", datetime(2026, 8, 28, 8, 0)),
+            ("明天上午8:30提醒我任务二", datetime(2026, 8, 28, 8, 30)),
+            ("明天上午8点30提醒我任务三", datetime(2026, 8, 28, 8, 30)),
+            ("明天上午八点提醒我任务四", datetime(2026, 8, 28, 8, 0)),
+            ("明天上午八点半提醒我任务五", datetime(2026, 8, 28, 8, 30)),
             ("明天下午12点提醒我午餐", datetime(2026, 8, 28, 12, 0)),
         )
         for text, expected in samples:
@@ -399,3 +399,81 @@ class Phase7Tests(unittest.TestCase):
                 window.findChild(QLabel, "quickParseStatus").text(),
             )
             window.deleteLater()
+
+    def test_20_unqualified_hour_chooses_only_future_afternoon_candidate(self) -> None:
+        parser = NaturalLanguageParser(
+            now_provider=lambda: datetime(2026, 8, 27, 16, 5)
+        )
+        parsed = parser.parse("我4点半下课，记得提醒我")
+        self.assertTrue(parsed.is_valid, parsed.errors)
+        self.assertEqual(parsed.due_at, datetime(2026, 8, 27, 16, 30))
+        self.assertEqual(parsed.title, "下课")
+
+    def test_21_dotted_month_day_and_leading_subject_are_cleaned(self) -> None:
+        parser = NaturalLanguageParser(
+            now_provider=lambda: datetime(2026, 8, 27, 16, 5)
+        )
+        parsed = parser.parse("我8.27下午五点下课，记得提醒我")
+        self.assertTrue(parsed.is_valid, parsed.errors)
+        self.assertEqual(parsed.due_at, datetime(2026, 8, 27, 17, 0))
+        self.assertEqual(parsed.title, "下课")
+
+    def test_22_explicit_period_and_existing_daily_scenarios_stay_stable(self) -> None:
+        parser = NaturalLanguageParser(
+            now_provider=lambda: datetime(2026, 8, 27, 16, 5)
+        )
+        tomorrow = parser.parse("明天下午3点提醒我交作业")
+        self.assertTrue(tomorrow.is_valid, tomorrow.errors)
+        self.assertEqual(tomorrow.due_at, datetime(2026, 8, 28, 15, 0))
+        self.assertEqual(tomorrow.title, "交作业")
+
+        daily = parser.parse("每天晚上8点提醒我背单词")
+        self.assertTrue(daily.is_valid, daily.errors)
+        self.assertEqual(daily.due_at, datetime(2026, 8, 27, 20, 0))
+        self.assertEqual(daily.repeat_type, REPEAT_DAILY)
+        self.assertEqual(daily.title, "背单词")
+
+        dawn = parser.parse("明天凌晨4点提醒我出发")
+        self.assertTrue(dawn.is_valid, dawn.errors)
+        self.assertEqual(dawn.due_at, datetime(2026, 8, 28, 4, 0))
+
+    def test_23_supported_date_forms_leave_only_the_task_title(self) -> None:
+        parser = NaturalLanguageParser(
+            now_provider=lambda: datetime(2026, 8, 27, 16, 5)
+        )
+        samples = (
+            ("我8.27下午五点下课，记得提醒我", datetime(2026, 8, 27, 17, 0)),
+            ("我8月27日下午五点下课，记得提醒我", datetime(2026, 8, 27, 17, 0)),
+            ("我8月27号下午五点下课，记得提醒我", datetime(2026, 8, 27, 17, 0)),
+            ("我2026-08-27下午五点下课，记得提醒我", datetime(2026, 8, 27, 17, 0)),
+            ("我今天下午五点下课，记得提醒我", datetime(2026, 8, 27, 17, 0)),
+            ("我明天下午五点下课，记得提醒我", datetime(2026, 8, 28, 17, 0)),
+            ("我后天下午五点下课，记得提醒我", datetime(2026, 8, 29, 17, 0)),
+        )
+        for text, due_at in samples:
+            with self.subTest(text=text):
+                parsed = parser.parse(text)
+                self.assertTrue(parsed.is_valid, parsed.errors)
+                self.assertEqual(parsed.due_at, due_at)
+                self.assertEqual(parsed.title, "下课")
+
+    def test_24_title_cleanup_never_removes_internal_pronoun(self) -> None:
+        parser = NaturalLanguageParser(
+            now_provider=lambda: datetime(2026, 8, 27, 16, 5)
+        )
+        incomplete = parser.parse("提醒我买《我的世界》")
+        self.assertEqual(incomplete.title, "买《我的世界》")
+        complete = parser.parse("明天下午3点提醒我买《我的世界》")
+        self.assertTrue(complete.is_valid, complete.errors)
+        self.assertEqual(complete.title, "买《我的世界》")
+
+    def test_25_two_future_12_hour_candidates_require_period_confirmation(self) -> None:
+        parser = NaturalLanguageParser(
+            now_provider=lambda: datetime(2026, 8, 27, 3, 0)
+        )
+        parsed = parser.parse("我4点半下课，记得提醒我")
+        self.assertFalse(parsed.is_valid)
+        self.assertIsNone(parsed.due_at)
+        self.assertIn("歧义", "".join(parsed.errors))
+        self.assertIn("下午4:30", "".join(parsed.errors))
+        self.assertEqual(parsed.title, "下课")

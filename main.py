@@ -11,6 +11,7 @@ from config import AppConfig
 from pet_window import PetWindow
 from reminder_manager import ReminderManager
 from todo_manager import TodoManager, TodoStorageError
+from ui_resources import load_application_icon
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -24,6 +25,7 @@ def main(argv: list[str] | None = None) -> int:
     app = QApplication(qt_args)
     app.setApplicationName("AIPetNew")
     app.setApplicationDisplayName("AI 桌宠")
+    app.setWindowIcon(load_application_icon())
     app.setQuitOnLastWindowClosed(False)
 
     try:

@@ -202,7 +202,10 @@ class PetWindow(QLabel):
 
     def _open_chat_window(self) -> None:
         if self._chat_window is None:
-            self._chat_window = ChatWindow(self._chat_service or ChatService())
+            self._chat_window = ChatWindow(
+                self._chat_service or ChatService(),
+                todo_manager=self._todo_manager,
+            )
         if self._chat_window.isMinimized():
             state = self._chat_window.windowState() & ~Qt.WindowState.WindowMinimized
             self._chat_window.setWindowState(state | Qt.WindowState.WindowActive)

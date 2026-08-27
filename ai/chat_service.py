@@ -112,6 +112,21 @@ class ChatService:
             raise ChatBusyError("生成期间不能清空聊天，请先停止。")
         self._history.clear()
 
+    def record_local_exchange(self, user_text: str, assistant_text: str) -> None:
+        """Record a verified local action only after it really succeeds."""
+
+        if self.is_busy:
+            raise ChatBusyError("生成期间不能记录本地操作结果。")
+        normalized_user = user_text.strip()
+        normalized_assistant = assistant_text.strip()
+        if not normalized_user or not normalized_assistant:
+            raise ValueError("本地操作记录不能为空。")
+        self._history.append({"role": "user", "content": normalized_user})
+        self._history.append(
+            {"role": "assistant", "content": normalized_assistant}
+        )
+        self._trim_history()
+
     def cancel_active_stream(self) -> None:
         cancel = getattr(self.client, "cancel_active_stream", None)
         if callable(cancel):

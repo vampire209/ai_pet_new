@@ -43,6 +43,9 @@ _EXPLICIT_CHINESE_DATE = re.compile(
 _MONTH_DAY_PATTERN = re.compile(
     r"(?<![\d年])(?P<month>\d{1,2})月\s*(?P<day>\d{1,2})(?:日|号)"
 )
+_DOTTED_MONTH_DAY_PATTERN = re.compile(
+    r"(?<!\d)(?P<month>\d{1,2})\.(?P<day>\d{1,2})(?!\d)"
+)
 _NEXT_WEEK_PATTERN = re.compile(r"下(?:周|星期)\s*([一二三四五六日天])")
 _WEEKDAY_PATTERN = re.compile(r"(?:周|星期)\s*([一二三四五六日天])")
 _COLON_TIME_PATTERN = re.compile(
@@ -55,6 +58,16 @@ _POINT_TIME_PATTERN = re.compile(
 _RELATIVE_HALF_HOUR = re.compile(r"半\s*小时\s*后")
 _RELATIVE_MINUTES = re.compile(rf"(?P<value>{_NUMBER_TOKEN})\s*分钟\s*后")
 _RELATIVE_HOURS = re.compile(rf"(?P<value>{_NUMBER_TOKEN})\s*小时\s*后")
+_LEADING_SUBJECT_TIME_PATTERN = re.compile(
+    rf"^我\s*(?=(?:"
+    rf"今天|明天|后天|今晚|明晚|凌晨|早上|上午|中午|下午|晚上|"
+    rf"\d{{4}}[-/]\d{{1,2}}[-/]\d{{1,2}}|"
+    rf"\d{{1,2}}[./]\d{{1,2}}|"
+    rf"\d{{1,2}}月\s*\d{{1,2}}(?:日|号)?|"
+    rf"(?:[01]?\d|2[0-3]):[0-5]\d|"
+    rf"{_NUMBER_TOKEN}\s*点"
+    rf"))"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +93,14 @@ class ParsedTask:
         if self.due_at is None:
             return None
         return self.due_at.isoformat(timespec="seconds")
+
+
+@dataclass(frozen=True, slots=True)
+class _ClockTime:
+    """A parsed wall-clock time plus an optional 12-hour alternative."""
+
+    value: time
+    alternative: time | None = None
 
 
 class NaturalLanguageParser:
@@ -223,8 +244,11 @@ class NaturalLanguageParser:
     def _parse_clock_time(
         source: str,
         errors: list[str],
-    ) -> time | None:
-        period_match = re.search(r"明晚|今晚|早上|上午|中午|下午|晚上", source)
+    ) -> _ClockTime | None:
+        period_match = re.search(
+            r"明晚|今晚|凌晨|早上|上午|中午|下午|晚上",
+            source,
+        )
         period = period_match.group(0) if period_match is not None else ""
 
         colon = _COLON_TIME_PATTERN.search(source)
@@ -249,7 +273,7 @@ class NaturalLanguageParser:
 
         if period in {"下午", "晚上", "明晚", "今晚"} and hour < 12:
             hour += 12
-        elif period in {"早上", "上午"} and hour == 12:
+        elif period in {"凌晨", "早上", "上午"} and hour == 12:
             hour = 0
         elif period == "中午" and hour < 11:
             hour += 12
@@ -257,13 +281,19 @@ class NaturalLanguageParser:
         if not 0 <= hour <= 23 or not 0 <= minute <= 59:
             errors.append("时间表达不明确，请补充有效的具体时间。")
             return None
-        return time(hour, minute)
+        primary = time(hour, minute)
+        alternative = (
+            time(hour + 12, minute)
+            if not period and 1 <= hour <= 11
+            else None
+        )
+        return _ClockTime(primary, alternative)
 
     def _parse_calendar_due(
         self,
         source: str,
         current: datetime,
-        clock_time: time | None,
+        clock_time: _ClockTime | None,
         repeat_type: str,
         repeat_weekdays: tuple[int, ...],
         errors: list[str],
@@ -276,7 +306,7 @@ class NaturalLanguageParser:
             )
         )
         has_period_expression = bool(
-            re.search(r"早上|上午|中午|下午|晚上|今晚|明晚", source)
+            re.search(r"凌晨|早上|上午|中午|下午|晚上|今晚|明晚", source)
         )
 
         if clock_time is None:
@@ -287,22 +317,75 @@ class NaturalLanguageParser:
             return None
 
         try:
-            due, rolls_forward = self._resolve_date(
+            due, rolls_forward = self._resolve_clock_candidate(
                 source,
                 current,
                 clock_time,
                 repeat_type,
                 repeat_weekdays,
                 date_info,
+                errors,
             )
         except ValueError:
             errors.append("日期表达无效，请重新指定日期。")
+            return None
+
+        if due is None:
             return None
 
         if due <= current and not rolls_forward:
             errors.append("该时间已经过去，请重新指定时间。")
             return None
         return due
+
+    def _resolve_clock_candidate(
+        self,
+        source: str,
+        current: datetime,
+        clock_time: _ClockTime,
+        repeat_type: str,
+        repeat_weekdays: tuple[int, ...],
+        date_info: tuple[str, tuple[int, ...]] | None,
+        errors: list[str],
+    ) -> tuple[datetime | None, bool]:
+        primary = self._resolve_date(
+            source,
+            current,
+            clock_time.value,
+            repeat_type,
+            repeat_weekdays,
+            date_info,
+        )
+        if clock_time.alternative is None:
+            return primary
+
+        alternative = self._resolve_date(
+            source,
+            current,
+            clock_time.alternative,
+            repeat_type,
+            repeat_weekdays,
+            date_info,
+        )
+        future_candidates = [
+            candidate
+            for candidate in (primary, alternative)
+            if candidate[0] > current
+        ]
+        if len(future_candidates) == 1:
+            return future_candidates[0]
+        if len(future_candidates) == 2:
+            if future_candidates[0][0].date() != future_candidates[1][0].date():
+                return min(future_candidates, key=lambda item: item[0])
+            hour = clock_time.value.hour
+            minute = clock_time.value.minute
+            errors.append(
+                "时间表达有歧义："
+                f"你指的是上午{hour}:{minute:02d}还是下午{hour}:{minute:02d}？"
+                "请补充时段。"
+            )
+            return None, False
+        return primary
 
     def _resolve_date(
         self,
@@ -379,6 +462,12 @@ class NaturalLanguageParser:
                 int(month_day.group("month")),
                 int(month_day.group("day")),
             )
+        dotted = _DOTTED_MONTH_DAY_PATTERN.search(source)
+        if dotted is not None:
+            return "month_day", (
+                int(dotted.group("month")),
+                int(dotted.group("day")),
+            )
         if "后天" in source:
             return "relative", (2,)
         if "明天" in source or "明晚" in source:
@@ -409,7 +498,7 @@ class NaturalLanguageParser:
 
     @staticmethod
     def _extract_title(source: str) -> str:
-        cleaned = source
+        cleaned = _LEADING_SUBJECT_TIME_PATTERN.sub("", source, count=1)
         patterns = (
             _ADVANCE_CLAUSE_PATTERN,
             _RELATIVE_HALF_HOUR,
@@ -418,6 +507,7 @@ class NaturalLanguageParser:
             _EXPLICIT_NUMERIC_DATE,
             _EXPLICIT_CHINESE_DATE,
             _MONTH_DAY_PATTERN,
+            _DOTTED_MONTH_DAY_PATTERN,
             _NEXT_WEEK_PATTERN,
             _WEEKLY_PATTERN,
             _WEEKDAY_PATTERN,
@@ -425,7 +515,7 @@ class NaturalLanguageParser:
             _POINT_TIME_PATTERN,
             re.compile(r"每天|每日"),
             re.compile(r"今天|明天|后天|今晚|明晚"),
-            re.compile(r"早上|上午|中午|下午|晚上"),
+            re.compile(r"凌晨|早上|上午|中午|下午|晚上"),
             re.compile(r"记得提醒我|帮我提醒|请提醒我|提醒一下|提醒我"),
         )
         for pattern in patterns:
