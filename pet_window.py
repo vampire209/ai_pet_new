@@ -18,6 +18,8 @@ from PySide6.QtWidgets import QApplication, QLabel, QMenu, QMessageBox
 
 from animation_manager import AnimationManager
 from animation_state import AnimationStateController
+from ai.chat_service import ChatService
+from chat_window import ChatWindow
 from config import AppConfig
 from models.reminder import Reminder
 from models.task import Task, TaskDataError
@@ -37,12 +39,15 @@ class PetWindow(QLabel):
         todo_manager: TodoManager,
         reminder_manager: ReminderManager | None = None,
         parent=None,
+        chat_service: ChatService | None = None,
     ) -> None:
         super().__init__(parent)
         self._config = config
         self._todo_manager = todo_manager
         self._reminder_manager = reminder_manager or ReminderManager(todo_manager)
         self._todo_window: TodoWindow | None = None
+        self._chat_service = chat_service
+        self._chat_window: ChatWindow | None = None
         self._reminder_bubbles: dict[str, ReminderBubble] = {}
         self._press_global: QPoint | None = None
         self._drag_offset = QPoint()
@@ -87,7 +92,7 @@ class PetWindow(QLabel):
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setStyleSheet("background: transparent;")
         self.setCursor(Qt.CursorShape.OpenHandCursor)
-        self.setToolTip("按住左键拖动，右键退出")
+        self.setToolTip("按住左键拖动，双击打开待办，右键打开功能菜单")
 
     def _show_frame(self, pixmap: QPixmap) -> None:
         if pixmap.isNull():
@@ -194,6 +199,16 @@ class PetWindow(QLabel):
         self._todo_window.show()
         self._todo_window.raise_()
         self._todo_window.activateWindow()
+
+    def _open_chat_window(self) -> None:
+        if self._chat_window is None:
+            self._chat_window = ChatWindow(self._chat_service or ChatService())
+        if self._chat_window.isMinimized():
+            state = self._chat_window.windowState() & ~Qt.WindowState.WindowMinimized
+            self._chat_window.setWindowState(state | Qt.WindowState.WindowActive)
+        self._chat_window.show()
+        self._chat_window.raise_()
+        self._chat_window.activateWindow()
 
     def _on_reminder_due(self, task: Task, reminder: Reminder) -> None:
         existing = self._reminder_bubbles.get(reminder.id)
@@ -311,6 +326,9 @@ class PetWindow(QLabel):
         todo_action = QAction("打开待办", menu)
         todo_action.triggered.connect(lambda _checked=False: self._open_todo_window())
         menu.addAction(todo_action)
+        chat_action = QAction("AI聊天", menu)
+        chat_action.triggered.connect(lambda _checked=False: self._open_chat_window())
+        menu.addAction(chat_action)
         menu.addSeparator()
 
         exit_action = QAction("退出", menu)
@@ -343,6 +361,10 @@ class PetWindow(QLabel):
         return self._todo_window
 
     @property
+    def chat_window(self) -> ChatWindow | None:
+        return self._chat_window
+
+    @property
     def reminder_dialogs(self) -> tuple[ReminderBubble, ...]:
         """Phase 3/4 compatibility alias for the active reminder surface."""
         return tuple(self._reminder_bubbles.values())
@@ -357,6 +379,8 @@ class PetWindow(QLabel):
         self._reminder_manager.clear_queue()
         if self._todo_window is not None:
             self._todo_window.hide()
+        if self._chat_window is not None:
+            self._chat_window.shutdown()
         for bubble in list(self._reminder_bubbles.values()):
             bubble.close()
         self._reminder_bubbles.clear()

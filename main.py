@@ -1,4 +1,4 @@
-"""AI desktop pet Phase 5 entry point."""
+"""AI desktop pet application entry point."""
 
 from __future__ import annotations
 

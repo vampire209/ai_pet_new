@@ -1,7 +1,7 @@
 # AI 桌宠（新项目）
 
 这是与 `ai_pet_codex` 完全独立的 Windows / PySide6 新实现。当前完成至
-Phase 7，运行时不会读取旧项目路径。
+Phase 8，运行时不会读取旧项目路径。
 
 ## 桌宠功能
 
@@ -12,7 +12,7 @@ Phase 7，运行时不会读取旧项目路径。
 - 状态优先级为 `remind > move > wait > idle`
 - 真正超过系统拖动阈值后才进入 move，释放后恢复 idle
 - 双击左键打开单实例“我的待办”；单击和拖动不会误触发
-- 右键菜单提供“打开待办”和“退出”
+- 右键菜单提供“打开待办”“AI聊天”和“退出”
 
 ## 待办与多提醒
 
@@ -61,6 +61,22 @@ Phase 7，运行时不会读取旧项目路径。
 - 缺少具体时间、明显过去时间和未支持表达会明确报错且不会创建
 - 确认创建统一走 `TodoManager`，后续编辑、提醒、snooze 和持久化完全一致
 
+## DeepSeek AI 聊天
+
+- “AI聊天”是独立普通窗口，关闭聊天不会退出桌宠或影响 Todo
+- 使用 OpenAI 兼容 Python SDK 的 Chat Completions 流式接口
+- 默认地址为 `https://api.deepseek.com`
+- 默认模型为 `deepseek-v4-flash`，可切换为 `deepseek-v4-pro`
+- 请求显式关闭 thinking，聊天窗口只显示最终回答文字流
+- 网络请求在 Qt 后台线程池执行，桌宠动画、Todo 和提醒不会被阻塞
+- 每个回答只创建一个助手消息框，分块到达时原位更新
+- 支持停止生成；停止后保留已经显示的内容并停止继续追加
+- 支持清空聊天，同时清除当前会话上下文并保留系统人格
+- 保留最近 20 轮上下文，旧轮次自动丢弃，系统人格始终保留
+- 聊天人格只提供聊天、解释和建议，不会直接修改 Todo 或提醒数据
+- 未配置 Key、认证、网络、超时、限流、额度、模型和服务错误都会安全显示
+- API Key 只从 `DEEPSEEK_API_KEY` 环境变量读取，不写入代码、配置或日志
+
 ## 本地保存与兼容
 
 - 使用 `data/tasks.json` 本地持久化
@@ -80,13 +96,45 @@ python -m pip install -r requirements.txt
 python main.py
 ```
 
+首次使用 AI 聊天前，在当前 PowerShell 会话设置 DeepSeek API Key：
+
+```powershell
+$env:DEEPSEEK_API_KEY = "你的 DeepSeek API Key"
+python main.py
+```
+
+如需写入当前 Windows 用户的环境变量，可执行下面的命令，然后重新打开终端或
+重启桌宠：
+
+```powershell
+[Environment]::SetEnvironmentVariable(
+    "DEEPSEEK_API_KEY",
+    "你的 DeepSeek API Key",
+    "User"
+)
+```
+
+不要把真实 Key 写进 `.py`、JSON、README 或提交到 Git。未配置 Key 时桌宠、
+Todo、提醒和自然语言快速添加仍可正常使用；打开 AI 聊天会显示配置提示。
+
+默认模型无需额外配置。临时切换到 `deepseek-v4-pro`：
+
+```powershell
+$env:DEEPSEEK_MODEL = "deepseek-v4-pro"
+python main.py
+```
+
+恢复默认模型可关闭当前 PowerShell 窗口，或移除本会话中的
+`DEEPSEEK_MODEL`。聊天不会自动创建、完成或删除待办，需要待办时请使用“我的
+待办”或其中的中文快速添加。
+
 自动退出的启动冒烟检查：
 
 ```powershell
 python main.py --smoke-test
 ```
 
-运行 Phase 1–7 全部自动化测试：
+运行 Phase 1–8 全部自动化测试：
 
 ```powershell
 python -m unittest discover -s tests -p "test_phase*.py" -v
@@ -118,7 +166,23 @@ Phase 7 可控本地时间快速添加交互测试：
 python tests\live_phase7_quick_add.py
 ```
 
-## Phase 6–7 数据格式
+Phase 8 本地 Fake 流式聊天联调（不需要 Key，不联网、不产生费用）：
+
+```powershell
+python tests\live_phase8_chat.py
+```
+
+这个脚本验证流式增量、多轮上下文、停止、异常恢复和清空。只有在你明确希望
+发起一次真实请求并已经设置 `DEEPSEEK_API_KEY` 时，才手动运行：
+
+```powershell
+python tests\live_deepseek_api.py
+```
+
+没有 Key 时该真实探针会打印 `REAL_SKIP` 并正常退出，不会自动读取任何密钥
+文件。自动化测试、smoke-test 和 Fake 联调都不会调用真实 API。
+
+## Phase 6–8 数据格式
 
 ```json
 [
@@ -182,4 +246,4 @@ python tests\live_phase7_quick_add.py
 - `assets/animations/remind/frame_01.png` 至 `frame_08.png`
 
 `remind` 使用用户提供的现有素材，没有重新生成。当前没有 `wait` 素材，因此
-wait 状态会安全显示 idle。AI/API 和云同步尚未实现。
+wait 状态会安全显示 idle。AI 聊天已经独立实现；云同步尚未实现。
