@@ -10,6 +10,8 @@ from PySide6.QtWidgets import QApplication
 from config import AppConfig
 from ai.profile_service import ProfileService
 from pet_window import PetWindow
+from memory.memory_service import MemoryService
+from memory.memory_store import MemoryStorageError
 from reminder_manager import ReminderManager
 from todo_manager import TodoManager, TodoStorageError
 from ui_resources import load_application_icon
@@ -37,11 +39,17 @@ def main(argv: list[str] | None = None) -> int:
 
     reminder_manager = ReminderManager(todo_manager)
     profile_service = ProfileService()
+    try:
+        memory_service = MemoryService(":memory:" if smoke_test else None)
+    except MemoryStorageError as exc:
+        print(f"[启动失败] {exc}", file=sys.stderr)
+        return 1
     pet = PetWindow(
         AppConfig.load(),
         todo_manager,
         reminder_manager,
         profile_service=profile_service,
+        memory_service=memory_service,
     )
     pet.show()
     reminder_manager.start(immediate=True)

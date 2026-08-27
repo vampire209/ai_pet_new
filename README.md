@@ -1,7 +1,7 @@
 # AI 桌宠（新项目）
 
 这是与 `ai_pet_codex` 完全独立的 Windows / PySide6 新实现。当前完成至
-Phase 10A，运行时不会读取旧项目路径。
+Phase 10B，运行时不会读取旧项目路径。
 
 ## 桌宠功能
 
@@ -12,7 +12,7 @@ Phase 10A，运行时不会读取旧项目路径。
 - 状态优先级为 `remind > move > wait > idle`
 - 真正超过系统拖动阈值后才进入 move，释放后恢复 idle
 - 双击左键打开单实例“我的待办”；单击和拖动不会误触发
-- 右键菜单提供“打开待办”“AI聊天”“桌宠设置”和“退出”
+- 右键菜单提供“打开待办”“AI聊天”“桌宠设置”“记忆管理”和“退出”
 
 ## 待办与多提醒
 
@@ -112,6 +112,19 @@ Phase 10A，运行时不会读取旧项目路径。
 - 配置缺失或损坏时安全恢复默认，不影响桌宠启动
 - Phase 10A 不包含长期记忆、SQLite、Embedding 或自动记忆
 
+## 手动长期记忆
+
+- 右键“记忆管理”打开单实例 Memory Manager，关闭窗口不会退出桌宠
+- 记忆分为核心记忆、普通记忆和归档记忆，三种状态彼此明确分离
+- 支持手动新增、编辑、永久删除、设为/取消核心、归档、恢复和关键字搜索
+- 核心记忆归档时会自动取消核心；归档记忆恢复后回到普通记忆
+- 中文、英文和 Emoji 内容均可保存，空内容不会写入数据库
+- 数据使用 SQLite 持久化到 Windows 用户配置目录的 `ai_pet_new\memory.db`
+- Memory 与 Profile、Todo、Reminder 和聊天历史相互独立
+- Clear Chat 只清聊天记录，不会删除或改变任何 Memory
+- Phase 10B 不会自动生成记忆，也不会把记忆注入 DeepSeek Persona 或聊天上下文
+- Phase 10B 不包含 Embedding、向量检索、自动归档或自动遗忘规则
+
 ## 本地保存与兼容
 
 - 使用 `data/tasks.json` 本地持久化
@@ -169,7 +182,7 @@ python main.py
 python main.py --smoke-test
 ```
 
-运行 Phase 1–9 全部自动化测试：
+运行 Phase 1–10B 全部自动化测试：
 
 ```powershell
 python -m unittest discover -s tests -p "test_phase*.py" -v
@@ -231,6 +244,15 @@ python tests\live_phase10a_profile.py
 
 该脚本验证名字即时同步与重启恢复、女友 Persona、黏人女友自定义参数、
 安全的高亲密行为描述，以及 Clear Chat 保留 Profile。
+
+Phase 10B 手动长期记忆可见联调（A–F 使用 Fake client 和临时 SQLite）：
+
+```powershell
+python tests\live_phase10b_memory.py
+```
+
+该脚本验证新增、核心切换、归档/恢复、编辑、重启持久化，以及 Clear Chat
+不会清除 Memory。测试不会创建或修改正式用户目录中的 `memory.db`。
 
 Phase 9 人工验证：
 
