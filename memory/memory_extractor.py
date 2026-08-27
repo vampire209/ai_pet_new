@@ -20,18 +20,12 @@ _TEMPORARY_CUES = (
 )
 _TODO_CUES = ("提醒我", "提醒一下", "叫我", "待办", "备忘录", "备忘提醒")
 _EXPLICIT_LONG_TERM_CUES = ("记住", "以后", "从现在开始", "今后")
-_SIGNAL_TERMS = (
-    "傅里叶变换",
-    "傅里叶",
-    "Z 变换",
-    "z 变换",
-    "Z变换",
-    "z变换",
-    "拉普拉斯变换",
-    "拉普拉斯",
-    "信号与系统",
-    "卷积",
-    "频域",
+_SPECIFIC_SIGNAL_TOPICS = (
+    ("傅里叶", "learning:fourier_transform", "傅里叶变换"),
+    ("拉普拉斯", "learning:laplace_transform", "拉普拉斯变换"),
+    ("z变换", "learning:z_transform", "Z 变换"),
+    ("卷积", "learning:convolution", "卷积"),
+    ("频域", "learning:frequency_domain", "频域分析"),
 )
 
 _LEARNING_PATTERNS = tuple(
@@ -65,20 +59,14 @@ def _sentence(text: str) -> str:
     return normalized + "。"
 
 
-def _signal_concepts(text: str) -> tuple[str, ...]:
-    concepts: list[str] = []
-    lowered = text.lower().replace(" ", "")
-    if "傅里叶" in text:
-        concepts.append("傅里叶变换")
-    if "z变换" in lowered:
-        concepts.append("Z 变换")
-    if "拉普拉斯" in text:
-        concepts.append("拉普拉斯变换")
-    if "卷积" in text:
-        concepts.append("卷积")
-    if "频域" in text:
-        concepts.append("频域分析")
-    return tuple(concepts)
+def _specific_signal_topic(text: str) -> tuple[str, str] | None:
+    """Return the most specific stable topic represented by one subject."""
+
+    compact = _normalize_key_text(text)
+    for cue, topic_key, label in _SPECIFIC_SIGNAL_TOPICS:
+        if cue in compact:
+            return topic_key, label
+    return None
 
 
 def infer_memory_metadata(content: str) -> tuple[str, str]:
@@ -90,7 +78,10 @@ def infer_memory_metadata(content: str) -> tuple[str, str]:
         cue in normalized for cue in ("简短", "简洁", "详细", "步骤", "推导", "答案")
     ):
         return "preference", "preference:math_answer_style"
-    if any(term.lower().replace(" ", "") in compact for term in _SIGNAL_TERMS):
+    specific_signal_topic = _specific_signal_topic(normalized)
+    if specific_signal_topic is not None:
+        return "learning", specific_signal_topic[0]
+    if "信号与系统" in compact:
         return "learning", "learning:signal_system"
     if "钢琴" in normalized:
         return "learning", "learning:钢琴"
@@ -196,13 +187,12 @@ class MemoryExtractor:
             subject = _clean_subject(match.group("subject"))
             if not subject or subject in {"什么", "啥"}:
                 return None
-            if any(term.lower().replace(" ", "") in _normalize_key_text(subject) for term in _SIGNAL_TERMS):
-                concepts = _signal_concepts(subject)
-                if concepts:
-                    detail = "、".join(concepts)
-                    content = f"用户近期正在学习信号与系统，内容包括{detail}。"
-                else:
-                    content = "用户近期正在学习信号与系统。"
+            specific_signal_topic = _specific_signal_topic(subject)
+            if specific_signal_topic is not None:
+                topic_key, label = specific_signal_topic
+                content = f"用户近期正在信号与系统相关学习中研究{label}。"
+            elif "信号与系统" in _normalize_key_text(subject):
+                content = "用户最近正在学习信号与系统。"
                 topic_key = "learning:signal_system"
             else:
                 content = f"用户最近正在学习{subject}。"

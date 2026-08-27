@@ -230,14 +230,18 @@ class Phase10CMemoryTests(unittest.TestCase):
                 service.capture_user_message(text)
             self.assertEqual(len(service.active_memories()), 1)
 
-    def test_11_same_signal_topic_is_merged_in_place(self) -> None:
+    def test_11_specific_signal_topics_remain_separate(self) -> None:
         with temporary_memory_service() as (service, _path, _root):
-            first = service.capture_user_message("我最近在学傅里叶变换。")
-            second = service.capture_user_message("我现在还开始学 Z 变换了。")
-            self.assertEqual(first.id, second.id)
-            self.assertEqual(len(service.active_memories()), 1)
-            self.assertIn("傅里叶变换", second.content)
-            self.assertIn("Z 变换", second.content)
+            fourier = service.capture_user_message("我最近在学傅里叶变换。")
+            z_transform = service.capture_user_message(
+                "我现在还开始学 Z 变换了。"
+            )
+            self.assertNotEqual(fourier.id, z_transform.id)
+            self.assertEqual(len(service.active_memories()), 2)
+            self.assertEqual(
+                {fourier.topic_key, z_transform.topic_key},
+                {"learning:fourier_transform", "learning:z_transform"},
+            )
 
     def test_12_explicit_new_long_term_requirement_updates_active_memory(self) -> None:
         with temporary_memory_service() as (service, _path, _root):
@@ -480,16 +484,18 @@ class Phase10CMemoryTests(unittest.TestCase):
         with temporary_memory_service() as (memories, _path, _root):
             first = memories.capture_user_message("我最近在学傅里叶变换。")
             window = MemoryManagerWindow(memories)
-            updated = memories.capture_user_message("我现在还开始学 Z 变换了。")
+            refreshes: list[bool] = []
+            memories.memories_changed.connect(lambda: refreshes.append(True))
+            updated = memories.capture_user_message(
+                "我最近还在学傅里叶变换。",
+                now=datetime(2026, 8, 28, 10, 30, 0),
+            )
             self.app.processEvents()
             self.assertEqual(first.id, updated.id)
-            rows = window.findChildren(MemoryItemWidget)
-            texts = [
-                label.text()
-                for row in rows
-                for label in row.findChildren(QLabel, "memoryContent")
-            ]
-            self.assertTrue(any("Z 变换" in text for text in texts))
+            self.assertEqual(updated.topic_key, "learning:fourier_transform")
+            self.assertEqual(memories.last_capture_trace.action, "update")
+            self.assertEqual(refreshes, [True])
+            self.assertIn(updated.id, window.rendered_memory_ids)
             window.close()
 
     def test_32_manual_edit_is_not_immediately_overwritten(self) -> None:
@@ -564,19 +570,21 @@ class Phase10CMemoryTests(unittest.TestCase):
         candidate = self.extractor.extract("我最近也开始研究傅里叶变换了。")
         self.assertIsNotNone(candidate)
         self.assertEqual(candidate.category, "learning")
-        self.assertEqual(candidate.topic_key, "learning:signal_system")
+        self.assertEqual(candidate.topic_key, "learning:fourier_transform")
         self.assertIn("傅里叶变换", candidate.content)
 
     def test_38_current_research_expression_produces_candidate(self) -> None:
         candidate = self.extractor.extract("我目前在研究傅里叶变换。")
         self.assertIsNotNone(candidate)
         self.assertEqual(candidate.category, "learning")
+        self.assertEqual(candidate.topic_key, "learning:fourier_transform")
         self.assertIn("傅里叶变换", candidate.content)
 
     def test_39_recent_review_expression_produces_candidate(self) -> None:
         candidate = self.extractor.extract("这段时间在复习傅里叶变换。")
         self.assertIsNotNone(candidate)
         self.assertEqual(candidate.category, "learning")
+        self.assertEqual(candidate.topic_key, "learning:fourier_transform")
         self.assertIn("傅里叶变换", candidate.content)
 
     def test_40_fourier_question_does_not_create_memory(self) -> None:
@@ -710,7 +718,7 @@ class Phase10CMemoryTests(unittest.TestCase):
             self.assertEqual(messages[-1]["content"], "我最近在学钢琴。")
             chat.fail_turn()
 
-    def test_45_fourier_candidate_reports_manual_core_skip_decision(
+    def test_45_fourier_candidate_creates_beside_manual_signal_core(
         self,
     ) -> None:
         with temporary_memory_service(
@@ -719,6 +727,8 @@ class Phase10CMemoryTests(unittest.TestCase):
             core = memories.create_memory("用户最近正在学习信号与系统")
             core = memories.set_core(core.id)
             original_updated_at = core.updated_at
+            changes: list[bool] = []
+            memories.memories_changed.connect(lambda: changes.append(True))
 
             with self.assertLogs(
                 "memory.memory_service",
@@ -733,39 +743,109 @@ class Phase10CMemoryTests(unittest.TestCase):
             self.assertIsNotNone(trace.candidate)
             self.assertEqual(
                 trace.candidate.content,
-                "用户近期正在学习信号与系统，内容包括傅里叶变换。",
+                "用户近期正在信号与系统相关学习中研究傅里叶变换。",
             )
             self.assertEqual(trace.candidate.category, "learning")
             self.assertEqual(
                 trace.candidate.topic_key,
-                "learning:signal_system",
+                "learning:fourier_transform",
             )
             self.assertEqual(trace.candidate.importance, 0.65)
-            self.assertEqual(trace.action, "skip")
-            self.assertEqual(
-                trace.skip_reason,
-                "existing_manual_memory_protected_without_explicit_update",
-            )
-            self.assertEqual(trace.result_memory_id, core.id)
-            self.assertEqual(len(trace.existing_matches), 1)
-            match = trace.existing_matches[0]
-            self.assertEqual(match.memory_id, core.id)
-            self.assertEqual(match.rule, "topic_key_same")
-            self.assertEqual(match.score, 100)
-            self.assertTrue(match.is_core)
-            self.assertEqual(match.source, SOURCE_MANUAL)
-            self.assertEqual(result.id, core.id)
+            self.assertEqual(trace.action, "create")
+            self.assertIsNone(trace.skip_reason)
+            self.assertEqual(trace.result_memory_id, result.id)
+            self.assertNotEqual(result.id, core.id)
+            self.assertEqual(result.topic_key, "learning:fourier_transform")
+            self.assertEqual(result.source, SOURCE_CHAT_AUTO)
+            self.assertFalse(result.is_core)
+            self.assertEqual(changes, [True])
             self.assertEqual(
                 memories.get_memory(core.id).updated_at,
                 original_updated_at,
             )
             output = "\n".join(logs.output)
-            self.assertIn("topic_key=learning:signal_system", output)
-            self.assertIn("rule=topic_key_same", output)
-            self.assertIn("action=skip", output)
-            self.assertIn(
+            self.assertIn("topic_key=learning:fourier_transform", output)
+            self.assertIn("action=create", output)
+
+    def test_46_specific_learning_topic_key_mapping(self) -> None:
+        cases = (
+            ("我最近在学信号与系统", "learning:signal_system"),
+            ("我最近开始研究傅里叶变换", "learning:fourier_transform"),
+            ("我最近开始学习拉普拉斯变换", "learning:laplace_transform"),
+            ("我最近开始学习 Z 变换", "learning:z_transform"),
+            ("我最近在学习卷积", "learning:convolution"),
+        )
+        for text, expected_topic in cases:
+            with self.subTest(text=text):
+                candidate = self.extractor.extract(text)
+                self.assertIsNotNone(candidate)
+                self.assertEqual(candidate.topic_key, expected_topic)
+
+    def test_47_repeated_fourier_updates_one_automatic_memory(self) -> None:
+        with temporary_memory_service() as (memories, _path, _root):
+            first = memories.capture_user_message(
+                "我最近开始研究傅里叶变换",
+                now=FIXED_NOW,
+            )
+            changes: list[bool] = []
+            memories.memories_changed.connect(lambda: changes.append(True))
+            second = memories.capture_user_message(
+                "我最近还在学傅里叶变换",
+                now=datetime(2026, 8, 28, 10, 30, 0),
+            )
+            self.assertEqual(first.id, second.id)
+            self.assertEqual(second.topic_key, "learning:fourier_transform")
+            self.assertEqual(len(memories.active_memories()), 1)
+            self.assertEqual(memories.last_capture_trace.action, "update")
+            self.assertEqual(
+                memories.last_capture_trace.existing_matches[0].rule,
+                "topic_key_same",
+            )
+            self.assertEqual(changes, [True])
+            self.assertGreater(second.updated_at, first.updated_at)
+
+    def test_48_fourier_and_laplace_can_coexist(self) -> None:
+        with temporary_memory_service() as (memories, _path, _root):
+            fourier = memories.capture_user_message(
+                "我最近开始研究傅里叶变换"
+            )
+            laplace = memories.capture_user_message(
+                "我最近开始学习拉普拉斯变换"
+            )
+            self.assertNotEqual(fourier.id, laplace.id)
+            self.assertEqual(
+                {memory.topic_key for memory in memories.active_memories()},
+                {
+                    "learning:fourier_transform",
+                    "learning:laplace_transform",
+                },
+            )
+
+    def test_49_signal_system_still_skips_protected_manual_core(self) -> None:
+        with temporary_memory_service() as (memories, _path, _root):
+            core = memories.create_memory("用户最近正在学习信号与系统")
+            core = memories.set_core(core.id)
+            original_updated_at = core.updated_at
+            changes: list[bool] = []
+            memories.memories_changed.connect(lambda: changes.append(True))
+
+            result = memories.capture_user_message(
+                "我最近正在学习信号与系统",
+                now=datetime(2026, 8, 28, 10, 30, 0),
+            )
+            trace = memories.last_capture_trace
+            self.assertEqual(result.id, core.id)
+            self.assertEqual(trace.candidate.topic_key, "learning:signal_system")
+            self.assertEqual(trace.action, "skip")
+            self.assertEqual(
+                trace.skip_reason,
                 "existing_manual_memory_protected_without_explicit_update",
-                output,
+            )
+            self.assertEqual(trace.existing_matches[0].rule, "topic_key_same")
+            self.assertEqual(changes, [])
+            self.assertEqual(
+                memories.get_memory(core.id).updated_at,
+                original_updated_at,
             )
 
 
