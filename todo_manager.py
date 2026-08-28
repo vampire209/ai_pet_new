@@ -9,6 +9,8 @@ import sys
 from datetime import datetime
 from typing import Callable, Iterable
 
+from PySide6.QtCore import QStandardPaths
+
 from config import PROJECT_ROOT
 from models.task import Task, TaskDataError, new_task_id
 
@@ -23,11 +25,25 @@ class TodoStorageError(RuntimeError):
     """A user-visible persistence failure."""
 
 
+def default_tasks_data_path() -> Path:
+    """Keep packaged writes out of PyInstaller's read-only/temporary bundle."""
+
+    if not getattr(sys, "frozen", False):
+        return PROJECT_ROOT / "data" / "tasks.json"
+    root = QStandardPaths.writableLocation(
+        QStandardPaths.StandardLocation.GenericConfigLocation
+    )
+    base = Path(root) if root else Path.home() / ".config"
+    return base / "ai_pet_new" / "tasks.json"
+
+
 class TodoManager:
     """Own task state and save each mutation atomically to local JSON."""
 
     def __init__(self, data_path: Path | str | None = None) -> None:
-        self._data_path = Path(data_path) if data_path else PROJECT_ROOT / "data" / "tasks.json"
+        self._data_path = (
+            Path(data_path) if data_path else default_tasks_data_path()
+        )
         self._tasks: list[Task] = []
         self._change_listeners: list[Callable[[], None]] = []
         self._initialize_storage()

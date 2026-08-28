@@ -2,4 +2,16 @@ __pycache__/
 *.py[cod]
 .venv/
 .pytest_cache/
+build/
+build-*/
+dist/
+dist-*/
+*.spec
+!AIPetNew.spec
+.env
+*.log
+memory.db
+tasks.json
+profile.json
+chat_ui.json
 data/tasks.json

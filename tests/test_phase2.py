@@ -26,7 +26,7 @@ from PySide6.QtWidgets import QApplication, QDialog, QLineEdit, QMessageBox
 
 from config import AppConfig
 from pet_window import PetWindow
-from todo_manager import TodoManager
+from todo_manager import TodoManager, default_tasks_data_path
 from todo_window import TaskEditDialog, TodoWindow
 
 
@@ -35,6 +35,26 @@ class Phase2Tests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication(["phase2-tests"])
         cls.config = AppConfig.load()
+
+    def test_default_tasks_path_uses_user_directory_when_packaged(self) -> None:
+        with patch.object(sys, "frozen", False, create=True):
+            self.assertEqual(
+                default_tasks_data_path(),
+                PROJECT_ROOT / "data" / "tasks.json",
+            )
+        with (
+            patch.object(sys, "frozen", True, create=True),
+            patch(
+                "todo_manager.QStandardPaths.writableLocation",
+                return_value=r"C:\Users\Test\AppData\Local",
+            ),
+        ):
+            packaged_path = default_tasks_data_path()
+        self.assertEqual(
+            packaged_path,
+            Path(r"C:\Users\Test\AppData\Local\ai_pet_new\tasks.json"),
+        )
+        self.assertNotIn("_MEI", str(packaged_path))
 
     def test_crud_and_all_states_survive_manager_restart(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
