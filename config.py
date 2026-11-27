@@ -13,6 +13,8 @@ import sys
 from typing import Any
 
 
+from app_paths import user_app_config_path
+
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.json"
 
@@ -49,19 +51,33 @@ class AppConfig:
 
     @classmethod
     def load(cls, path: Path | None = None) -> "AppConfig":
-        """Load JSON settings without letting a damaged file stop startup."""
-        config_path = path or DEFAULT_CONFIG_PATH
-        if not config_path.exists():
-            return cls()
+        """Load JSON settings, merging optional user-directory overrides."""
+        raw: dict[str, Any] = {}
+        paths_to_read = (
+            (path,)
+            if path is not None
+            else (DEFAULT_CONFIG_PATH, user_app_config_path())
+        )
+        for config_path in paths_to_read:
+            if not config_path.exists():
+                continue
+            try:
+                loaded = json.loads(config_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                print(
+                    f"[配置] 无法读取 {config_path.name}，跳过该文件：{exc}",
+                    file=sys.stderr,
+                )
+                continue
+            if not isinstance(loaded, dict):
+                print(
+                    f"[配置] {config_path.name} 顶层必须是对象，跳过该文件。",
+                    file=sys.stderr,
+                )
+                continue
+            raw.update(loaded)
 
-        try:
-            raw = json.loads(config_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            print(f"[配置] 无法读取 {config_path.name}，使用默认值：{exc}", file=sys.stderr)
-            return cls()
-
-        if not isinstance(raw, dict):
-            print(f"[配置] {config_path.name} 顶层必须是对象，使用默认值。", file=sys.stderr)
+        if not raw:
             return cls()
 
         return cls(

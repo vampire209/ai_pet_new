@@ -5,14 +5,10 @@ from __future__ import annotations
 import re
 
 from voice.text import prepare_text_for_speech
-from word_learning.reading_suggestions import (
-    VOCABULARY_BLOCK_END,
-    VOCABULARY_BLOCK_START,
-)
 
 
 _URL_STARTS = ("https://", "http://")
-_NORMAL_RUN = re.compile(r"[^`~<\[!h]+")
+_NORMAL_RUN = re.compile(r"[^`~\[!h]+")
 _SOFT_MIN = 180
 _SOFT_MAX = 240
 _MAX_UNRESOLVED_MARKUP = 16384
@@ -41,7 +37,6 @@ class SpeechSegmenter:
     def reset(self) -> None:
         self._source = ""
         self._prose = ""
-        self._hidden_vocabulary = False
         self._fence_char = ""
         self._fence_length = 0
         # Nonnegative while the source line consists only of spaces/tabs.
@@ -80,21 +75,6 @@ class SpeechSegmenter:
     def _scan(self, *, final: bool) -> None:
         while self._source:
             source = self._source
-            if self._hidden_vocabulary:
-                end = source.find(VOCABULARY_BLOCK_END)
-                if end >= 0:
-                    self._take(end + len(VOCABULARY_BLOCK_END))
-                    self._hidden_vocabulary = False
-                    continue
-                # Retain only a possible split closing marker, not the JSON.
-                suffix = 0
-                if not final:
-                    for size in range(min(len(source), len(VOCABULARY_BLOCK_END) - 1), 0, -1):
-                        if VOCABULARY_BLOCK_END.startswith(source[-size:]):
-                            suffix = size
-                            break
-                self._take(len(source) - suffix)
-                return
 
             if self._fence_char:
                 newline = source.find("\n")
@@ -114,20 +94,6 @@ class SpeechSegmenter:
                 continue
 
             char = source[0]
-            if char == "<":
-                if source.startswith(VOCABULARY_BLOCK_START):
-                    self._take(len(VOCABULARY_BLOCK_START))
-                    self._hidden_vocabulary = True
-                    continue
-                if source.startswith(VOCABULARY_BLOCK_END):
-                    self._take(len(VOCABULARY_BLOCK_END))
-                    continue
-                if any(marker.startswith(source) for marker in (
-                    VOCABULARY_BLOCK_START, VOCABULARY_BLOCK_END,
-                )):
-                    if final:
-                        self._take(len(source))
-                    return
 
             if char == "h":
                 if any(prefix.startswith(source) for prefix in _URL_STARTS):

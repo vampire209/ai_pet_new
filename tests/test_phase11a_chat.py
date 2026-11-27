@@ -22,7 +22,6 @@ from PySide6.QtCore import QThreadPool, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-from ai.ability_modes import ABILITY_ENGLISH_TEACHER
 from ai.chat_action_router import ChatActionRouter
 from ai.chat_service import ChatService
 from ai.chat_ui_config import ChatUiSettings
@@ -40,11 +39,6 @@ from voice.text import prepare_text_for_speech
 from voice.tts_service import TTSService
 from voice.voice_models import VoiceSettings, VoiceState
 from voice.voice_service import VoiceService
-from word_learning.reading_suggestions import (
-    VOCABULARY_BLOCK_END,
-    VOCABULARY_BLOCK_START,
-)
-from word_learning.service import WordLearningService
 
 
 FIXED_NOW = datetime(2026, 9, 13, 10, 0)
@@ -282,29 +276,6 @@ class Phase11AChatTests(unittest.TestCase):
         self.assertNotEqual(tts.inference_threads[0], get_ident())
         self.assertEqual(player.playback_threads, [get_ident()])
         self.assertEqual(len(player.received_audio), 1)
-
-    def test_07_hidden_reading_vocabulary_json_is_never_spoken(self):
-        voice, tts, player = self.voice()
-        profiles = self.profiles(PetProfile(ability_mode=ABILITY_ENGLISH_TEACHER))
-        learning = WordLearningService(self.root / "words.db")
-        self.resources.append(learning)
-        visible = "**句子分析**\nmaintain 在这里表示坚持认为。"
-        payload = {"suggested_vocabulary": [{
-            "word": "maintain", "meaning": "坚持认为", "exam_meaning": "主张",
-            "part_of_speech": "v.", "source_sentence": "Some researchers maintain it works.",
-        }]}
-        raw = (visible + "\n" + VOCABULARY_BLOCK_START + "\n"
-               + json.dumps(payload, ensure_ascii=False) + "\n" + VOCABULARY_BLOCK_END)
-        window = self.window(
-            FakeDeepSeekClient(((raw,),)), voice=voice,
-            profile_service=profiles, word_learning_service=learning,
-        )
-        self.send(window, "请分析阅读长难句 Some researchers maintain it works.")
-        self.wait(lambda: player.is_playing() and not window.is_generating)
-        self.assertEqual(tts.requested_texts, [prepare_text_for_speech(visible)])
-        self.assertNotIn("suggested_vocabulary", window.message_texts[-1][1])
-        self.assertEqual(window.service.history[-1]["content"], visible)
-        self.assertEqual(len(window.suggested_vocabulary_cards), 1)
 
     def test_08_voice_off_keeps_complete_reply_without_tts(self):
         voice, tts, player = self.voice(enabled=False)

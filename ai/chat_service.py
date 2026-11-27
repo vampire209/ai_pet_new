@@ -8,6 +8,7 @@ from threading import Event
 from typing import Any
 
 from ai.ai_config import DeepSeekConfig
+from ai.chat_history_store import ChatHistoryStore
 from ai.deepseek_client import DeepSeekClient, MissingAPIKeyError
 from ai.persona import DEFAULT_SYSTEM_PROMPT
 from memory.memory_models import MemoryDataError, MemoryRecord
@@ -40,6 +41,7 @@ class ChatService:
         max_context_rounds: int | None = None,
         memory_service: MemoryService | None = None,
         memory_retriever: MemoryRetriever | None = None,
+        history_store: ChatHistoryStore | None = None,
     ) -> None:
         self.config = config or DeepSeekConfig.from_environment()
         self.client = client or DeepSeekClient(self.config)
@@ -51,7 +53,12 @@ class ChatService:
             else int(max_context_rounds)
         )
         self.max_context_rounds = max(1, configured_rounds)
-        self._history: list[dict[str, str]] = []
+        self._history_store = history_store
+        self._history: list[dict[str, str]] = (
+            history_store.load(max_messages=self.max_context_rounds * 2)
+            if history_store is not None
+            else []
+        )
         self._pending_user: str | None = None
         self._memory_service: MemoryService | None = None
         self._memory_retriever: MemoryRetriever | None = None
@@ -211,6 +218,7 @@ class ChatService:
             }
         )
         self._trim_history()
+        self._persist_history()
 
     def stop_turn(self, partial_assistant_text: str) -> None:
         user_text = self._take_pending_user()
@@ -219,6 +227,7 @@ class ChatService:
             self._history.append({"role": "user", "content": user_text})
             self._history.append({"role": "assistant", "content": partial})
             self._trim_history()
+            self._persist_history()
 
     def fail_turn(self) -> None:
         self._pending_user = None
@@ -227,6 +236,7 @@ class ChatService:
         if self.is_busy:
             raise ChatBusyError("生成期间不能清空聊天，请先停止。")
         self._history.clear()
+        self._persist_history()
 
     def record_local_exchange(self, user_text: str, assistant_text: str) -> None:
         """Record a verified local action only after it really succeeds."""
@@ -242,6 +252,23 @@ class ChatService:
             {"role": "assistant", "content": normalized_assistant}
         )
         self._trim_history()
+        self._persist_history()
+
+    def reconfigure(
+        self,
+        config: DeepSeekConfig,
+        *,
+        api_key: str | None = None,
+    ) -> None:
+        """Update client connection settings live for future chat turns."""
+        self.config = config
+        reconfigure_client = getattr(self.client, "reconfigure", None)
+        if callable(reconfigure_client):
+            reconfigure_client(config, api_key=api_key)
+
+    def _persist_history(self) -> None:
+        if self._history_store is not None:
+            self._history_store.save(self._history)
 
     def cancel_active_stream(self) -> None:
         cancel = getattr(self.client, "cancel_active_stream", None)

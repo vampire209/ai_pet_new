@@ -47,8 +47,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ai.ability_modes import ABILITY_DEFAULT, ABILITY_MODE_LABELS, ability_mode_label
-from ai.ability_modes import ABILITY_ENGLISH_TEACHER
+from ai.ai_settings_service import AiConnectionSettings, AiSettingsService
 from ai.chat_action_router import (
     ChatActionKind,
     ChatActionRouter,
@@ -66,7 +65,7 @@ from ai.chat_worker import ChatStreamWorker
 from ai.deepseek_client import DeepSeekClientError
 from ai.persona_builder import PersonaBuilder
 from ai.profile import DEFAULT_PET_NAME, PetProfile
-from ai.profile_service import ProfileService, ProfileStorageError
+from ai.profile_service import ProfileService
 from models.task import TaskDataError
 from memory.memory_service import MemoryService
 from todo_manager import TodoManager, TodoStorageError
@@ -76,19 +75,10 @@ from ui_resources import (
     load_avatar_source,
     load_character_source,
 )
+from voice.settings_store import VoiceSettingsStore
 from voice.voice_service import VoiceService
 from voice.voice_models import VoiceState
 from voice.runtime import create_desktop_voice_service
-from word_learning.models import LearningSettings, WordLearningDataError
-from word_learning.reading_suggestions import (
-    is_reading_vocabulary_request,
-    parse_reading_response,
-    reading_vocabulary_turn_instruction,
-    visible_response_text,
-)
-from word_learning.repository import WordLearningStorageError
-from word_learning.service import WordLearningService
-from word_learning.suggestion_widgets import SuggestedVocabularyCard
 
 
 _MARKDOWN_BOLD = re.compile(r"(?<!\*)\*\*(?=\S)(.+?)(?<=\S)\*\*(?!\*)")
@@ -487,8 +477,7 @@ class TodoConfirmationCard(QFrame):
 class ChatWindow(QWidget):
     """Render normal AI streams and confirmed local Todo actions safely."""
 
-    word_learning_requested = Signal(str)
-    word_learning_words_requested = Signal(object)
+    ai_settings_requested = Signal()
 
     def __init__(
         self,
@@ -502,8 +491,9 @@ class ChatWindow(QWidget):
         profile_service: ProfileService | None = None,
         persona_builder: PersonaBuilder | None = None,
         memory_service: MemoryService | None = None,
-        word_learning_service: WordLearningService | None = None,
         voice_service: VoiceService | None = None,
+        ai_settings_service: AiSettingsService | None = None,
+        voice_settings_store: VoiceSettingsStore | None = None,
     ) -> None:
         super().__init__(parent)
         self._service = service or ChatService(memory_service=memory_service)
@@ -515,8 +505,14 @@ class ChatWindow(QWidget):
         self._ui_settings = ui_settings or ChatUiSettings()
         self._profile_service = profile_service
         self._memory_service = memory_service
-        self._word_learning_service = word_learning_service
+        self._ai_settings_service = ai_settings_service
+        self._voice_settings_store = voice_settings_store
         self._voice_service = voice_service or create_desktop_voice_service(parent=self)
+        if self._voice_settings_store is not None:
+            restored_voice = self._voice_settings_store.apply_to(
+                self._voice_service.settings
+            )
+            self._voice_service.configure(restored_voice)
         self._accept_voice_reply = False
         self._voice_streaming_turn = False
         self._persona_builder = persona_builder or PersonaBuilder()
@@ -531,15 +527,12 @@ class ChatWindow(QWidget):
         self._worker: ChatStreamWorker | None = None
         self._assistant_label: QLabel | None = None
         self._assistant_text = ""
-        self._turn_ability_mode = ABILITY_DEFAULT
-        self._turn_reading_vocabulary_expected = False
         self._accept_chunks = False
         self._outcome_received = False
         self._message_records: list[tuple[str, QLabel]] = []
         self._message_bubbles: list[QFrame] = []
         self._message_rows: list[QWidget] = []
         self._todo_cards: list[TodoConfirmationCard] = []
-        self._suggestion_cards: list[SuggestedVocabularyCard] = []
         self._last_row_role: str | None = None
         avatar_source = load_avatar_source()
         character_source = load_character_source()
@@ -551,6 +544,7 @@ class ChatWindow(QWidget):
             avatar_source.path == UI_ASSETS.idle_fallback
         )
         self._setup_ui()
+        self._restore_history_messages()
         self._voice_service.text_recognized.connect(self.submit_recognized_text)
         self._voice_service.notice.connect(self._on_voice_notice)
         self._voice_service.error.connect(self._on_voice_error)
@@ -559,9 +553,11 @@ class ChatWindow(QWidget):
         self._sync_voice_controls()
         if profile_service is not None:
             profile_service.profile_changed.connect(self.apply_profile)
+        if ai_settings_service is not None:
+            ai_settings_service.settings_changed.connect(self.apply_ai_settings)
         if not self._service.is_configured:
             self._show_status(
-                "未配置 DeepSeek API Key；本地待办创建仍可使用。",
+                "未配置 DeepSeek API Key（可在“桌宠设置 → AI 接口设置”中填写）；本地待办创建仍可使用。",
                 error=True,
             )
 
@@ -602,28 +598,6 @@ class ChatWindow(QWidget):
         title_layout.addWidget(self.header_status_label)
         header_layout.addLayout(title_layout)
         header_layout.addStretch(1)
-        self.ability_combo = QComboBox()
-        self.ability_combo.setObjectName("chatAbilityCombo")
-        self.ability_combo.setToolTip("能力模式只影响之后的专业回答，不改变关系模式")
-        for ability_mode, label in ABILITY_MODE_LABELS.items():
-            self.ability_combo.addItem(f"能力：{label}", ability_mode)
-        if self._profile_service is not None:
-            ability_index = self.ability_combo.findData(
-                self._profile_service.profile.ability_mode
-            )
-            self.ability_combo.setCurrentIndex(max(0, ability_index))
-        else:
-            self.ability_combo.setEnabled(False)
-            self.ability_combo.setToolTip("当前聊天未连接桌宠设置，能力模式不可保存")
-        self.ability_combo.currentIndexChanged.connect(self._on_ability_changed)
-        header_layout.addWidget(self.ability_combo)
-        self.word_learning_button = QPushButton("英语学习")
-        self.word_learning_button.setObjectName("wordLearningButton")
-        self.word_learning_button.setToolTip("打开卡片式背词、复习和单词本")
-        self.word_learning_button.clicked.connect(
-            lambda: self.word_learning_requested.emit("today")
-        )
-        header_layout.addWidget(self.word_learning_button)
         short_model = self._service.config.model.removeprefix("deepseek-")
         self.model_label = QLabel(f"DeepSeek · {short_model}")
         self.model_label.setObjectName("chatModelLabel")
@@ -634,6 +608,9 @@ class ChatWindow(QWidget):
         self.clear_button.setToolTip("聊天菜单")
         self.header_menu = QMenu(self)
         self.header_menu.setObjectName("chatHeaderMenu")
+        self.ai_settings_action = self.header_menu.addAction("AI 接口设置")
+        self.ai_settings_action.triggered.connect(self.ai_settings_requested.emit)
+        self.header_menu.addSeparator()
         self.clear_chat_action = self.header_menu.addAction("清空聊天")
         self.clear_chat_action.triggered.connect(self._confirm_clear)
         self.header_menu.addSeparator()
@@ -845,9 +822,6 @@ class ChatWindow(QWidget):
         self._accept_voice_reply = False
         self._voice_streaming_turn = False
 
-        if self._try_handle_word_learning_action(text):
-            return
-
         action = self._action_router.route(text)
         if action.is_local:
             self.input.clear()
@@ -860,34 +834,6 @@ class ChatWindow(QWidget):
         except (EmptyChatMessageError, ChatBusyError, DeepSeekClientError) as exc:
             self._show_status(str(exc), error=True)
             return
-
-        self._turn_ability_mode = (
-            self._profile_service.profile.ability_mode
-            if self._profile_service is not None
-            else ABILITY_DEFAULT
-        )
-        self._turn_reading_vocabulary_expected = (
-            self._turn_ability_mode == ABILITY_ENGLISH_TEACHER
-            and self._word_learning_service is not None
-            and is_reading_vocabulary_request(text)
-        )
-        if self._turn_reading_vocabulary_expected:
-            try:
-                turn_limit = (
-                    self._word_learning_service.settings
-                    .reading_vocab_suggestion_limit
-                )
-            except WordLearningStorageError as exc:
-                LOGGER.warning("阅读建议生词设置读取失败，使用默认数量：%s", exc)
-                turn_limit = 8
-            messages = (
-                *messages[:-1],
-                {
-                    "role": "system",
-                    "content": reading_vocabulary_turn_instruction(turn_limit),
-                },
-                messages[-1],
-            )
 
         self.input.clear()
         self._add_message("user", text, force_scroll=True)
@@ -968,11 +914,14 @@ class ChatWindow(QWidget):
 
     def _toggle_voice_reply(self, enabled: bool) -> None:
         self._accept_voice_reply = False
-        self._voice_service.configure(replace(
+        updated = replace(
             self._voice_service.settings,
             enable_voice_reply=enabled,
             stream_sentences=True,
-        ))
+        )
+        self._voice_service.configure(updated)
+        if self._voice_settings_store is not None:
+            self._voice_settings_store.save_from(self._voice_service.settings)
         if enabled:
             message = "从下一轮回复开始按句朗读。" if self.is_generating else "已开启：回答生成一句，朗读一句。"
         else:
@@ -984,6 +933,8 @@ class ChatWindow(QWidget):
         self._accept_voice_reply = False
         self._voice_streaming_turn = False
         self._voice_service.configure(replace(self._voice_service.settings, tts_backend=choice))
+        if self._voice_settings_store is not None:
+            self._voice_settings_store.save_from(self._voice_service.settings)
         self.voice_name_label.setText("Windows 已安装音色" if choice == "system" else "Serena · 中文女声")
         self._on_voice_notice("已切换声音来源；点击试听，或从下一轮语音回复开始使用。")
 
@@ -1016,26 +967,6 @@ class ChatWindow(QWidget):
         self._todo_cards.append(card)
         self._insert_message_widget(card, "assistant", force_scroll=True)
         self._refresh_message_widths()
-        return card
-
-    def _add_suggested_vocabulary_card(
-        self,
-        suggestions,
-    ) -> SuggestedVocabularyCard:
-        if self._word_learning_service is None:
-            raise WordLearningDataError("单词本服务不可用。")
-        card = SuggestedVocabularyCard(
-            tuple(suggestions),
-            self._word_learning_service,
-        )
-        card.study_requested.connect(self.word_learning_words_requested.emit)
-        self._suggestion_cards.append(card)
-        self._insert_message_widget(card, "assistant", force_scroll=True)
-        self._refresh_message_widths()
-        QTimer.singleShot(
-            0,
-            lambda current=card: self.scroll.ensureWidgetVisible(current, 0, 12),
-        )
         return card
 
     def _confirm_todo_card(self, card: TodoConfirmationCard) -> None:
@@ -1128,9 +1059,7 @@ class ChatWindow(QWidget):
         if not self._assistant_text:
             self._set_header_status("正在回复……")
         self._assistant_text += chunk
-        self._assistant_label.setText(
-            clean_chat_markdown(visible_response_text(self._assistant_text))
-        )
+        self._assistant_label.setText(clean_chat_markdown(self._assistant_text))
         self._scroll_to_bottom(force=follow)
 
         if self._accept_voice_reply and self._voice_streaming_turn:
@@ -1142,40 +1071,17 @@ class ChatWindow(QWidget):
         self._outcome_received = True
         self._accept_chunks = False
         self._assistant_text = full_text
-        try:
-            suggestion_limit = (
-                self._word_learning_service.settings.reading_vocab_suggestion_limit
-                if self._word_learning_service is not None
-                else 8
-            )
-        except WordLearningStorageError as exc:
-            LOGGER.warning("阅读建议生词设置读取失败，使用默认数量：%s", exc)
-            suggestion_limit = 8
-        parsed = parse_reading_response(full_text, limit=suggestion_limit)
         if self._assistant_label is not None:
             self._assistant_label.setText(
-                clean_chat_markdown(parsed.visible_text) or "（本次没有返回文字）"
+                clean_chat_markdown(full_text) or "（本次没有返回文字）"
             )
-        self._service.complete_turn(parsed.visible_text)
-        if parsed.parse_error:
-            LOGGER.warning("阅读建议生词解析回退：%s", parsed.parse_error)
-        elif self._turn_reading_vocabulary_expected and not parsed.suggestions:
-            LOGGER.info("本轮阅读回答未返回可展示的建议生词")
-        if (
-            parsed.suggestions
-            and self._turn_ability_mode == ABILITY_ENGLISH_TEACHER
-            and self._word_learning_service is not None
-        ):
-            try:
-                self._add_suggested_vocabulary_card(parsed.suggestions)
-            except (WordLearningDataError, WordLearningStorageError) as exc:
-                LOGGER.warning("阅读建议生词卡片创建失败：%s", exc)
+        self._service.complete_turn(full_text)
         self._show_status("回答完成。", error=False)
         if self._accept_voice_reply:
             if self._voice_streaming_turn:
                 self._voice_service.end_reply()
             elif not self._voice_service.settings.stream_sentences:
-                self._voice_service.speak(parsed.visible_text)
+                self._voice_service.speak(full_text)
 
     def _on_stopped(self, _worker_partial: str) -> None:
         if self._outcome_received:
@@ -1186,7 +1092,7 @@ class ChatWindow(QWidget):
         self._accept_chunks = False
         if self._assistant_label is not None and not self._assistant_text:
             self._assistant_label.setText("（已停止）")
-        self._service.stop_turn(visible_response_text(self._assistant_text))
+        self._service.stop_turn(self._assistant_text)
         self._show_status("已停止生成，已生成内容会保留。", error=False)
 
     def _on_error(self, message: str) -> None:
@@ -1312,6 +1218,17 @@ class ChatWindow(QWidget):
             ),
         )
 
+    def _restore_history_messages(self) -> None:
+        history = self._service.history
+        if not history:
+            return
+        for entry in history:
+            role = entry.get("role")
+            content = entry.get("content", "")
+            if role in ("user", "assistant") and content:
+                self._add_message(role, content, force_scroll=False)
+        self._scroll_to_bottom(force=True)
+
     def _refresh_message_widths(self) -> None:
         if not hasattr(self, "scroll"):
             return
@@ -1321,8 +1238,6 @@ class ChatWindow(QWidget):
             bubble.setMaximumWidth(maximum)
         for card in self._todo_cards:
             card.setMaximumWidth(maximum)
-        for card in self._suggestion_cards:
-            card.setMaximumWidth(maximum)
 
     def _set_header_status(self, message: str) -> None:
         self.header_status_label.setText(message)
@@ -1331,158 +1246,27 @@ class ChatWindow(QWidget):
         """Apply a saved profile to the header and all future AI requests."""
 
         self._pet_name = profile.pet_name
-        if hasattr(self, "ability_combo"):
-            ability_index = self.ability_combo.findData(profile.ability_mode)
-            with QSignalBlocker(self.ability_combo):
-                self.ability_combo.setCurrentIndex(max(0, ability_index))
         self._service.refresh_system_prompt()
         self.setWindowTitle(f"AI 桌宠聊天 - {self._pet_name}")
         if hasattr(self, "header_name_label"):
             self.header_name_label.setText(self._pet_name)
 
-    def _on_ability_changed(self, _index: int) -> None:
-        """Persist a capability-only change without touching chat or relationship."""
+    def apply_ai_settings(self, settings: AiConnectionSettings) -> None:
+        """Apply updated AI API key / base URL / model live without restart."""
 
-        if self._profile_service is None:
-            return
-        ability_mode = self.ability_combo.currentData()
-        current_profile = self._profile_service.profile
-        if ability_mode == current_profile.ability_mode:
-            return
-        try:
-            self._profile_service.save(
-                replace(current_profile, ability_mode=ability_mode)
+        config = settings.resolve_config()
+        self._service.reconfigure(config, api_key=settings.resolve_api_key())
+        if hasattr(self, "model_label"):
+            short_model = config.model.removeprefix("deepseek-")
+            self.model_label.setText(f"DeepSeek · {short_model}")
+            self.model_label.setToolTip(config.model)
+        if self._service.is_configured:
+            self._show_status("AI 接口设置已更新，下一次聊天生效。", error=False)
+        else:
+            self._show_status(
+                "未配置 DeepSeek API Key（可在“桌宠设置 → AI 接口设置”中填写）；本地待办创建仍可使用。",
+                error=True,
             )
-        except (ProfileStorageError, OSError) as exc:
-            old_index = self.ability_combo.findData(current_profile.ability_mode)
-            with QSignalBlocker(self.ability_combo):
-                self.ability_combo.setCurrentIndex(max(0, old_index))
-            self._show_status(str(exc), error=True)
-            return
-        self._show_status(
-            f"已切换到{ability_mode_label(ability_mode)}能力，从下一条消息起生效。",
-            error=False,
-        )
-
-    def _try_handle_word_learning_action(self, text: str) -> bool:
-        """Handle a deliberately small local command set before Todo routing."""
-
-        if self._word_learning_service is None or self._profile_service is None:
-            return False
-        if self._profile_service.profile.ability_mode != ABILITY_ENGLISH_TEACHER:
-            return False
-        normalized = text.strip()
-        if re.fullmatch(
-            r"(?:这些都加进去|把这些词(?:都)?加(?:到|入)单词本|全加)[吧。！!]?",
-            normalized,
-        ) and self._suggestion_cards:
-            self.input.clear()
-            self._add_message("user", text, force_scroll=True)
-            message = self._suggestion_cards[-1].add_all_pending()
-            self._add_message("assistant", message, force_scroll=True)
-            self._show_status(message, error=message.startswith("加入失败"))
-            return True
-        navigation: str | None = None
-        if re.fullmatch(r"(?:开始|我要|我想)?\s*背(?:英语)?单词[吧。！!]?", normalized):
-            navigation = "new"
-        elif re.fullmatch(
-            r"(?:开始|我要|我想)?\s*复习(?:一下)?(?:单词)?[吧。！!]?",
-            normalized,
-        ):
-            navigation = "review"
-        elif re.fullmatch(r"(?:看看|打开|查看)?\s*(?:我的)?单词本[吧。！!]?", normalized):
-            navigation = "wordbook"
-        if navigation is not None:
-            self.input.clear()
-            self._add_message("user", text, force_scroll=True)
-            self._add_message(
-                "assistant",
-                "已经为你打开卡片式英语学习，不会在聊天里刷屏。",
-                force_scroll=True,
-            )
-            self.word_learning_requested.emit(navigation)
-            self._show_status("已打开英语学习。", error=False)
-            return True
-
-        add_match = re.fullmatch(
-            r"(?:把|将)\s*([A-Za-z][A-Za-z'’\- ]{0,79}?)\s*"
-            r"(?:加到|加入|添加到)\s*(?:我的)?单词本"
-            r"(?:[，,]\s*(?:原句|上下文)[：:]\s*(.+))?[吧。！!]?",
-            normalized,
-        )
-        if add_match:
-            word_text = add_match.group(1).strip()
-            source_context = (add_match.group(2) or "").strip()
-            try:
-                result = self._word_learning_service.add_word(
-                    word_text,
-                    source="reading" if source_context else "manual",
-                    source_context=source_context,
-                )
-                message = (
-                    f"已把 {result.word.word} 加入单词本。"
-                    if result.created
-                    else "这个词已经在单词本里了。"
-                )
-            except (WordLearningDataError, WordLearningStorageError):
-                message = "这个词还缺少释义，请在“英语学习 → 单词本”中完整添加。"
-            self.input.clear()
-            self._add_message("user", text, force_scroll=True)
-            self._add_message("assistant", message, force_scroll=True)
-            self._show_status(message, error=False)
-            return True
-
-        delete_match = re.fullmatch(
-            r"(?:从(?:我的)?单词本(?:中)?\s*)?(?:删除|移除)\s*"
-            r"([A-Za-z][A-Za-z'’\- ]{0,79}?)[吧。！!]?",
-            normalized,
-        )
-        if delete_match:
-            word_text = delete_match.group(1).strip()
-            try:
-                word = self._word_learning_service.get_word_by_text(word_text)
-                if word is None:
-                    message = f"单词本里没有 {word_text.lower()}。"
-                else:
-                    self._word_learning_service.remove_word(word.id)
-                    message = f"已从单词本删除 {word.word}。"
-            except (WordLearningDataError, WordLearningStorageError) as exc:
-                message = str(exc)
-            self.input.clear()
-            self._add_message("user", text, force_scroll=True)
-            self._add_message("assistant", message, force_scroll=True)
-            self._show_status(message, error=False)
-            return True
-
-        setting_match = re.fullmatch(
-            r"(?:今天背|每天背|每日(?:学习|新词)?|把每日单词(?:数量)?改成)\s*"
-            r"(\d{1,3})\s*个?(?:单词)?[吧。！!]?",
-            normalized,
-        )
-        if setting_match:
-            count = int(setting_match.group(1))
-            try:
-                current = self._word_learning_service.settings
-                updated = LearningSettings(
-                    daily_new_word_count=count,
-                    daily_review_limit=current.daily_review_limit,
-                    word_reminder_enabled=current.word_reminder_enabled,
-                    word_reminder_time=current.word_reminder_time,
-                    word_reminder_task_id=current.word_reminder_task_id,
-                    reading_vocab_suggestion_limit=(
-                        current.reading_vocab_suggestion_limit
-                    ),
-                )
-                self._word_learning_service.save_settings(updated)
-                message = f"每日新词已调整为 {count} 个。"
-            except (WordLearningDataError, WordLearningStorageError) as exc:
-                message = str(exc)
-            self.input.clear()
-            self._add_message("user", text, force_scroll=True)
-            self._add_message("assistant", message, force_scroll=True)
-            self._show_status(message, error=False)
-            return True
-        return False
 
     def _show_status(self, message: str, *, error: bool) -> None:
         self.status_label.setProperty("error", error)
@@ -1567,7 +1351,6 @@ class ChatWindow(QWidget):
         self._message_bubbles.clear()
         self._message_rows.clear()
         self._todo_cards.clear()
-        self._suggestion_cards.clear()
         self._last_row_role = None
         self._assistant_label = None
         self._assistant_text = ""
@@ -1600,10 +1383,6 @@ class ChatWindow(QWidget):
         return tuple(self._todo_cards)
 
     @property
-    def suggested_vocabulary_cards(self) -> tuple[SuggestedVocabularyCard, ...]:
-        return tuple(self._suggestion_cards)
-
-    @property
     def service(self) -> ChatService:
         return self._service
 
@@ -1634,10 +1413,6 @@ class ChatWindow(QWidget):
     @property
     def memory_service(self) -> MemoryService | None:
         return self._memory_service
-
-    @property
-    def word_learning_service(self) -> WordLearningService | None:
-        return self._word_learning_service
 
     @property
     def pet_name(self) -> str:

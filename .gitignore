@@ -16,6 +16,10 @@ memory.db
 tasks.json
 profile.json
 chat_ui.json
+chat_history.json
+voice_settings.json
+ai_settings.json
+pet_state.json
 data/tasks.json
 
 # Optional voice resources stay external; Phase 11A generates no audio files.

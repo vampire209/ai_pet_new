@@ -5,8 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import sqlite3
 
-from PySide6.QtCore import QStandardPaths
-
+from app_paths import memory_db_path
 from memory.memory_models import MemoryRecord
 
 
@@ -15,11 +14,7 @@ class MemoryStorageError(RuntimeError):
 
 
 def default_memory_db_path() -> Path:
-    root = QStandardPaths.writableLocation(
-        QStandardPaths.StandardLocation.GenericConfigLocation
-    )
-    base = Path(root) if root else Path.home() / ".config"
-    return base / "ai_pet_new" / "memory.db"
+    return memory_db_path()
 
 
 _PHASE10C_COLUMNS = (

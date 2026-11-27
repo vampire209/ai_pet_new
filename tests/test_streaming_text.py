@@ -5,10 +5,6 @@ from __future__ import annotations
 import unittest
 
 from voice.streaming_text import SpeechSegmenter
-from word_learning.reading_suggestions import (
-    VOCABULARY_BLOCK_END,
-    VOCABULARY_BLOCK_START,
-)
 
 
 def segments(chunks):
@@ -86,16 +82,6 @@ class StreamingTextTests(unittest.TestCase):
         for source in ("先说。\n```", "先说。\n```python\n禁止朗读。", "先说。\n~~~隐藏内容。"):
             self.assert_any_split(source, ["先说。"])
 
-    def test_vocabulary_marker_and_json_hidden_at_every_split(self):
-        appendix = VOCABULARY_BLOCK_START + '{"word":"secret. 禁止！"}' + VOCABULARY_BLOCK_END
-        self.assert_any_split("分析完成。" + appendix + "可见结语。", ["分析完成。", "可见结语。"])
-        self.assert_any_split(appendix + appendix, [])
-
-    def test_unclosed_vocabulary_and_partial_markers_do_not_leak(self):
-        self.assert_any_split("正文。" + VOCABULARY_BLOCK_START + '{"word":"隐藏！"}', ["正文。"])
-        for marker_size in range(1, len(VOCABULARY_BLOCK_START)):
-            self.assertEqual(segments(["正文。", VOCABULARY_BLOCK_START[:marker_size]]), ["正文。"])
-
     def test_inline_code_waits_for_closure(self):
         parser = SpeechSegmenter()
         self.assertEqual(parser.feed("使用 `print('hello."), [])
@@ -146,9 +132,6 @@ class StreamingTextTests(unittest.TestCase):
         self.assertEqual(parser.feed("完成。尚未读出的尾部"), ["完成。"])
         parser.reset()
         self.assertEqual(parser.finish(), [])
-        parser.feed(VOCABULARY_BLOCK_START + "隐藏")
-        parser.reset()
-        self.assertEqual(parser.feed("全新一轮。"), ["全新一轮。"])
         parser.feed("\n```python\n不读")
         parser.reset()
         self.assertEqual(parser.feed("再次正常。"), ["再次正常。"])

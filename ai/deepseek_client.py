@@ -44,6 +44,25 @@ class DeepSeekClient:
     def is_configured(self) -> bool:
         return bool(self._api_key or self._sdk_client is not None)
 
+    def reconfigure(
+        self,
+        config: DeepSeekConfig,
+        *,
+        api_key: str | None = None,
+    ) -> None:
+        """Apply updated GUI/environment settings without restarting the app."""
+        self.config = config
+        if api_key is not None:
+            self._api_key = api_key.strip()
+        else:
+            self._api_key = os.environ.get(
+                self.config.api_key_environment_variable,
+                "",
+            ).strip()
+        # Reset lazily constructed SDK client unless an injected mock/test client is fixed.
+        if self._client_factory is None:
+            self._sdk_client = None
+
     def stream_chat(
         self,
         messages: Iterable[dict[str, str]],

@@ -1,8 +1,21 @@
 # AI 桌宠（新项目）
 
-这是与 `ai_pet_codex` 完全独立的 Windows / PySide6 新实现。已接通系统语音
-和独立环境中的 Qwen 0.6B Serena 语音，保留已有记忆、能力模式和英语学习功能。
-运行时不会读取旧项目路径。
+这是与 `ai_pet_codex` 完全独立的 Windows / PySide6 新实现。支持透明高 DPI 桌宠动画、系统托盘控制、待办与多节点提醒、DeepSeek 流式 AI 聊天、长期记忆、系统语音与独立环境 Qwen 0.6B Serena 语音。运行时不会读取旧项目路径。
+
+> **更新记录**：详细改动见 [改动日记（CHANGELOG.md）](CHANGELOG.md)。
+>
+> **可选英语学习版本**：背单词（单词本/复习卡片）与“英语老师能力模式”已从 `master` 主分支移除，并作为可选版本保留在 GitHub 分支 [`optional/english-learning`](https://github.com/vampire209/ai_pet_new/tree/optional/english-learning)（标签 `archive-english-learning`）。如需使用，可随时切换：
+> ```powershell
+> git fetch origin optional/english-learning
+> git checkout optional/english-learning
+> ```
+
+## 最新体验与配置说明（2026-11-27）
+
+- **系统托盘与位置记忆**：支持托盘图标与右键切换「始终置顶」「隐藏到托盘」，重启自动恢复上次拖动位置。
+- **图形化 AI 接口配置**：右键桌宠 →「桌宠设置 → AI 接口设置」（或聊天窗口右上角 `⋯` 菜单）可直接填写 DeepSeek API Key、Base URL 和模型名称并立即热生效；API Key 留空时仍自动回退读取 `DEEPSEEK_API_KEY` 环境变量。
+- **聊天与语音持久化**：多轮聊天记录、语音回复开关与声音来源重启后自动恢复。
+- **统一数据目录**：所有个人数据（`tasks.json`、`profile.json`、`memory.db`、`chat_history.json`、`voice_settings.json`、`ai_settings.json`、`pet_state.json`、`chat_ui.json`）统一保存在用户配置目录 `ai_pet_new/` 下，首次运行会自动迁移旧版 `data/tasks.json`。
 
 ## Qwen 本地语音（2026-09-24）
 

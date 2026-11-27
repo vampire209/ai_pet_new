@@ -36,24 +36,18 @@ class Phase2Tests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication(["phase2-tests"])
         cls.config = AppConfig.load()
 
-    def test_default_tasks_path_uses_user_directory_when_packaged(self) -> None:
-        with patch.object(sys, "frozen", False, create=True):
-            self.assertEqual(
-                default_tasks_data_path(),
-                PROJECT_ROOT / "data" / "tasks.json",
-            )
-        with (
-            patch.object(sys, "frozen", True, create=True),
-            patch(
-                "todo_manager.QStandardPaths.writableLocation",
-                return_value=r"C:\Users\Test\AppData\Local",
-            ),
+    def test_default_tasks_path_uses_unified_user_directory(self) -> None:
+        with patch(
+            "app_paths.QStandardPaths.writableLocation",
+            return_value=r"C:\Users\Test\AppData\Local",
         ):
-            packaged_path = default_tasks_data_path()
-        self.assertEqual(
-            packaged_path,
-            Path(r"C:\Users\Test\AppData\Local\ai_pet_new\tasks.json"),
-        )
+            with patch.object(sys, "frozen", False, create=True):
+                source_path = default_tasks_data_path()
+            with patch.object(sys, "frozen", True, create=True):
+                packaged_path = default_tasks_data_path()
+        expected = Path(r"C:\Users\Test\AppData\Local\ai_pet_new\tasks.json")
+        self.assertEqual(source_path, expected)
+        self.assertEqual(packaged_path, expected)
         self.assertNotIn("_MEI", str(packaged_path))
 
     def test_crud_and_all_states_survive_manager_restart(self) -> None:
@@ -286,7 +280,7 @@ class Phase2Tests(unittest.TestCase):
             menu_texts = [action.text() for action in pet._create_context_menu().actions()]
             self.assertEqual(
                 menu_texts,
-                ["打开待办", "AI聊天", "桌宠设置", "记忆管理", "", "退出"],
+                ["打开待办", "AI聊天", "桌宠设置", "记忆管理", "", "始终置顶", "隐藏到托盘", "", "退出"],
             )
             menu = pet._create_context_menu()
             menu.actions()[0].trigger()

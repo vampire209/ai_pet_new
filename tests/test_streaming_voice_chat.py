@@ -29,10 +29,6 @@ from voice.fake_backends import FakeAudioPlayer, FakeTTSBackend
 from voice.tts_service import TTSService
 from voice.voice_models import SpeechAudio, VoiceSettings
 from voice.voice_service import VoiceService
-from word_learning.reading_suggestions import (
-    VOCABULARY_BLOCK_END,
-    VOCABULARY_BLOCK_START,
-)
 
 
 class TextRecordingTTS(FakeTTSBackend):
@@ -217,31 +213,6 @@ class StreamingVoiceChatTests(unittest.TestCase):
         self.assertEqual(player.overlap_count, 0)
         self.finish_sentences(voice, player, expected)
         self.assertEqual(tts.texts, expected)
-
-    def test_hidden_vocabulary_tags_split_at_every_character_never_reach_tts(self):
-        voice, tts, player = self.voice()
-        visible = "这里是正常讲解。"
-        secret = '{"suggested_vocabulary":[],"internal":"绝不朗读这句话。"}'
-        raw = visible + VOCABULARY_BLOCK_START + secret + VOCABULARY_BLOCK_END
-        # Single-character chunks exercise every possible tag split boundary.
-        window = self.window(FakeDeepSeekClient((list(raw),)), voice=voice)
-        self.send(window)
-        self.wait(lambda: not window.is_generating)
-        self.finish_sentences(voice, player, [visible])
-        self.assertEqual(tts.texts, [visible])
-        self.assertEqual(window.service.history[-1]["content"], visible)
-
-    def test_malformed_or_unclosed_hidden_data_is_not_read(self):
-        for suffix in ("{broken: 隐藏语句。}" + VOCABULARY_BLOCK_END,
-                       '{"secret":"隐藏语句。"'):
-            with self.subTest(suffix=suffix):
-                voice, tts, player = self.voice()
-                raw = "可见回答。" + VOCABULARY_BLOCK_START + suffix
-                window = self.window(FakeDeepSeekClient((list(raw),)), voice=voice)
-                self.send(window)
-                self.wait(lambda: not window.is_generating)
-                self.finish_sentences(voice, player, ["可见回答。"])
-                self.assertEqual(tts.texts, ["可见回答。"])
 
     def test_fenced_code_split_across_chunks_is_not_spoken(self):
         voice, tts, player = self.voice()

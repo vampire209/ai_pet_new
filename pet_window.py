@@ -1,10 +1,11 @@
-"""Transparent desktop pet with todo and queued reminder integration."""
+"""Transparent desktop pet with system tray, todo, chat, and queued reminders."""
 
 from __future__ import annotations
 
+from dataclasses import replace
 import sys
 
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QPoint, QRect, Qt
 from PySide6.QtGui import (
     QAction,
     QCloseEvent,
@@ -14,30 +15,39 @@ from PySide6.QtGui import (
     QScreen,
     QShowEvent,
 )
-from PySide6.QtWidgets import QApplication, QLabel, QMenu, QMessageBox
+from PySide6.QtWidgets import (
+    QApplication,
+    QLabel,
+    QMenu,
+    QMessageBox,
+    QSystemTrayIcon,
+)
 
+from ai.ai_settings_service import AiSettingsService
+from ai.chat_history_store import ChatHistoryStore
+from ai.chat_service import ChatService
+from ai.deepseek_client import DeepSeekClient
+from ai.profile_service import ProfileService
 from animation_manager import AnimationManager
 from animation_state import AnimationStateController
-from ai.chat_service import ChatService
-from ai.profile_service import ProfileService
 from chat_window import ChatWindow
 from config import AppConfig
-from models.reminder import Reminder
-from models.task import Task, TaskDataError
 from memory.memory_service import MemoryService
 from memory_window import MemoryManagerWindow
+from models.reminder import Reminder
+from models.task import Task, TaskDataError
+from pet_state import PetStateStore, PetWindowState
+from profile_window import ProfileWindow
 from reminder_bubble import ReminderBubble
 from reminder_manager import ReminderManager
-from profile_window import ProfileWindow
-from word_learning.service import WordLearningService
-from word_learning.window import WordLearningWindow
-from todo_manager import TodoManager
-from todo_manager import TodoStorageError
+from todo_manager import TodoManager, TodoStorageError
 from todo_window import TodoWindow
+from ui_resources import load_application_icon
+from voice.settings_store import VoiceSettingsStore
 
 
 class PetWindow(QLabel):
-    """Frameless topmost pet with threshold-based left-button dragging."""
+    """Frameless pet window with system tray, topmost toggle, and saved position."""
 
     def __init__(
         self,
@@ -48,7 +58,10 @@ class PetWindow(QLabel):
         chat_service: ChatService | None = None,
         profile_service: ProfileService | None = None,
         memory_service: MemoryService | None = None,
-        word_learning_service: WordLearningService | None = None,
+        ai_settings_service: AiSettingsService | None = None,
+        chat_history_store: ChatHistoryStore | None = None,
+        voice_settings_store: VoiceSettingsStore | None = None,
+        state_store: PetStateStore | None = None,
     ) -> None:
         super().__init__(parent)
         self._config = config
@@ -61,8 +74,17 @@ class PetWindow(QLabel):
         self._profile_window: ProfileWindow | None = None
         self._memory_service = memory_service
         self._memory_window: MemoryManagerWindow | None = None
-        self._word_learning_service = word_learning_service
-        self._word_learning_window: WordLearningWindow | None = None
+        self._ai_settings_service = ai_settings_service
+        self._chat_history_store = chat_history_store
+        self._voice_settings_store = voice_settings_store
+        self._state_store = state_store
+        self._window_state = (
+            state_store.load() if state_store is not None else PetWindowState()
+        )
+        self._tray_icon: QSystemTrayIcon | None = None
+        self._tray_menu: QMenu | None = None
+        self._tray_toggle_action: QAction | None = None
+        self._tray_topmost_action: QAction | None = None
         self._reminder_bubbles: dict[str, ReminderBubble] = {}
         self._press_global: QPoint | None = None
         self._drag_offset = QPoint()
@@ -70,6 +92,7 @@ class PetWindow(QLabel):
         self._screen_signal_connected = False
 
         self._setup_window()
+        self._setup_tray()
 
         screen = QApplication.primaryScreen()
         initial_dpr = screen.devicePixelRatio() if screen is not None else 1.0
@@ -96,11 +119,10 @@ class PetWindow(QLabel):
         self._set_initial_position()
 
     def _setup_window(self) -> None:
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool
-        )
+        flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
+        if self._window_state.always_on_top:
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        self.setWindowFlags(flags)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
         self.setAutoFillBackground(False)
@@ -108,6 +130,111 @@ class PetWindow(QLabel):
         self.setStyleSheet("background: transparent;")
         self.setCursor(Qt.CursorShape.OpenHandCursor)
         self.setToolTip("按住左键拖动，双击打开待办，右键打开功能菜单")
+
+    def _setup_tray(self) -> None:
+        menu = QMenu()
+        toggle_action = QAction("隐藏桌宠", menu)
+        toggle_action.triggered.connect(self.toggle_pet_visibility)
+        menu.addAction(toggle_action)
+
+        topmost_action = QAction("始终置顶", menu)
+        topmost_action.setCheckable(True)
+        topmost_action.setChecked(self._window_state.always_on_top)
+        topmost_action.triggered.connect(self.set_always_on_top)
+        menu.addAction(topmost_action)
+        menu.addSeparator()
+
+        todo_action = QAction("打开待办", menu)
+        todo_action.triggered.connect(lambda _checked=False: self._open_todo_window())
+        menu.addAction(todo_action)
+        chat_action = QAction("AI聊天", menu)
+        chat_action.triggered.connect(lambda _checked=False: self._open_chat_window())
+        menu.addAction(chat_action)
+        profile_action = QAction("桌宠设置", menu)
+        profile_action.triggered.connect(
+            lambda _checked=False: self._open_profile_window()
+        )
+        menu.addAction(profile_action)
+        memory_action = QAction("记忆管理", menu)
+        memory_action.triggered.connect(
+            lambda _checked=False: self._open_memory_window()
+        )
+        menu.addAction(memory_action)
+        menu.addSeparator()
+
+        exit_action = QAction("退出", menu)
+        exit_action.triggered.connect(QApplication.instance().quit)
+        menu.addAction(exit_action)
+
+        self._tray_menu = menu
+        self._tray_toggle_action = toggle_action
+        self._tray_topmost_action = topmost_action
+
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            tray = QSystemTrayIcon(load_application_icon(), self)
+            tray.setToolTip("AI 桌宠")
+            tray.setContextMenu(menu)
+            tray.activated.connect(self._on_tray_activated)
+            tray.show()
+            self._tray_icon = tray
+
+    def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        if reason in (
+            QSystemTrayIcon.ActivationReason.Trigger,
+            QSystemTrayIcon.ActivationReason.DoubleClick,
+        ):
+            if self.isVisible():
+                self.raise_()
+                self.activateWindow()
+            else:
+                self.show_from_tray()
+
+    def _sync_tray_state(self) -> None:
+        if self._tray_toggle_action is not None:
+            self._tray_toggle_action.setText(
+                "隐藏桌宠" if self.isVisible() else "显示桌宠"
+            )
+        if self._tray_topmost_action is not None:
+            self._tray_topmost_action.setChecked(self._window_state.always_on_top)
+
+    def _save_window_state(self) -> None:
+        if self._state_store is not None:
+            self._state_store.save(self._window_state)
+
+    def set_always_on_top(self, enabled: bool) -> None:
+        target = bool(enabled)
+        if target == self._window_state.always_on_top and bool(
+            self.windowFlags() & Qt.WindowType.WindowStaysOnTopHint
+        ) == target:
+            self._sync_tray_state()
+            return
+        was_visible = self.isVisible()
+        position = self.pos()
+        self._window_state = replace(self._window_state, always_on_top=target)
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, target)
+        if was_visible:
+            self.show()
+            self.move(position)
+            if target:
+                self.raise_()
+        self._save_window_state()
+        self._sync_tray_state()
+
+    def hide_to_tray(self) -> None:
+        self.hide()
+        self._sync_tray_state()
+
+    def show_from_tray(self) -> None:
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self._sync_tray_state()
+
+    def toggle_pet_visibility(self) -> None:
+        if self.isVisible():
+            self.hide_to_tray()
+        else:
+            self.show_from_tray()
 
     def _show_frame(self, pixmap: QPixmap) -> None:
         if pixmap.isNull():
@@ -127,7 +254,28 @@ class PetWindow(QLabel):
         )
         self.adjustSize()
 
+    def _is_position_visible_on_any_screen(self, x: int, y: int) -> bool:
+        width = max(1, self.width())
+        height = max(1, self.height())
+        pet_rect = QRect(x, y, width, height)
+        for screen in QApplication.screens():
+            area = screen.availableGeometry()
+            overlap = area.intersected(pet_rect)
+            if overlap.width() >= min(48, width) and overlap.height() >= min(48, height):
+                return True
+        return False
+
     def _set_initial_position(self) -> None:
+        if (
+            self._window_state.x is not None
+            and self._window_state.y is not None
+            and self._is_position_visible_on_any_screen(
+                self._window_state.x, self._window_state.y
+            )
+        ):
+            self.move(self._window_state.x, self._window_state.y)
+            return
+
         screen = QApplication.primaryScreen()
         if screen is None:
             return
@@ -143,6 +291,7 @@ class PetWindow(QLabel):
             handle.screenChanged.connect(self._on_screen_changed)
             self._screen_signal_connected = True
             self._on_screen_changed(handle.screen())
+        self._sync_tray_state()
 
     def _on_screen_changed(self, screen: QScreen | None) -> None:
         if screen is not None:
@@ -189,6 +338,12 @@ class PetWindow(QLabel):
             return
         if self._dragging:
             self._state_controller.set_moving(False)
+            self._window_state = replace(
+                self._window_state,
+                x=self.x(),
+                y=self.y(),
+            )
+            self._save_window_state()
         self._dragging = False
         self._press_global = None
         self.setCursor(Qt.CursorShape.OpenHandCursor)
@@ -215,21 +370,35 @@ class PetWindow(QLabel):
         self._todo_window.raise_()
         self._todo_window.activateWindow()
 
+    def _create_default_chat_service(self) -> ChatService:
+        if self._ai_settings_service is not None:
+            settings = self._ai_settings_service.settings
+            config = settings.resolve_config()
+            client = DeepSeekClient(config, api_key=settings.resolve_api_key())
+            return ChatService(
+                client=client,
+                config=config,
+                memory_service=self._memory_service,
+                history_store=self._chat_history_store,
+            )
+        return ChatService(
+            memory_service=self._memory_service,
+            history_store=self._chat_history_store,
+        )
+
     def _open_chat_window(self) -> None:
         if self._chat_window is None:
-            word_learning_service = self._ensure_word_learning_service()
+            service = self._chat_service or self._create_default_chat_service()
             self._chat_window = ChatWindow(
-                self._chat_service or ChatService(),
+                service,
                 todo_manager=self._todo_manager,
                 profile_service=self._profile_service,
                 memory_service=self._memory_service,
-                word_learning_service=word_learning_service,
+                ai_settings_service=self._ai_settings_service,
+                voice_settings_store=self._voice_settings_store,
             )
-            self._chat_window.word_learning_requested.connect(
-                self._open_word_learning_window
-            )
-            self._chat_window.word_learning_words_requested.connect(
-                self._open_word_learning_words
+            self._chat_window.ai_settings_requested.connect(
+                lambda: self._open_profile_window(tab="ai")
             )
         if self._chat_window.isMinimized():
             state = self._chat_window.windowState() & ~Qt.WindowState.WindowMinimized
@@ -238,9 +407,13 @@ class PetWindow(QLabel):
         self._chat_window.raise_()
         self._chat_window.activateWindow()
 
-    def _open_profile_window(self) -> None:
+    def _open_profile_window(self, tab: str = "profile") -> None:
         if self._profile_window is None:
-            self._profile_window = ProfileWindow(self._profile_service)
+            self._profile_window = ProfileWindow(
+                self._profile_service,
+                ai_settings_service=self._ai_settings_service,
+            )
+        self._profile_window.open_tab(tab)
         if self._profile_window.isMinimized():
             state = self._profile_window.windowState() & ~Qt.WindowState.WindowMinimized
             self._profile_window.setWindowState(state | Qt.WindowState.WindowActive)
@@ -259,46 +432,6 @@ class PetWindow(QLabel):
         self._memory_window.show()
         self._memory_window.raise_()
         self._memory_window.activateWindow()
-
-    def _ensure_word_learning_service(self) -> WordLearningService:
-        if self._word_learning_service is None:
-            data_path = self._todo_manager.data_path.parent / "word_learning.db"
-            self._word_learning_service = WordLearningService(data_path)
-        return self._word_learning_service
-
-    def _open_word_learning_window(self, page: str = "today") -> None:
-        service = self._ensure_word_learning_service()
-        if self._word_learning_window is None:
-            self._word_learning_window = WordLearningWindow(
-                service,
-                profile_service=self._profile_service,
-                todo_manager=self._todo_manager,
-            )
-        self._word_learning_window.open_page(page)
-        if self._word_learning_window.isMinimized():
-            state = (
-                self._word_learning_window.windowState()
-                & ~Qt.WindowState.WindowMinimized
-            )
-            self._word_learning_window.setWindowState(
-                state | Qt.WindowState.WindowActive
-            )
-        self._word_learning_window.show()
-        self._word_learning_window.raise_()
-        self._word_learning_window.activateWindow()
-
-    def _open_word_learning_words(self, word_ids) -> None:
-        service = self._ensure_word_learning_service()
-        words = [
-            word
-            for word_id in tuple(word_ids)
-            if (word := service.get_word(str(word_id))) is not None
-        ]
-        if not words:
-            return
-        self._open_word_learning_window("today")
-        if self._word_learning_window is not None:
-            self._word_learning_window.start_session("reading", words=words)
 
     def _on_reminder_due(self, task: Task, reminder: Reminder) -> None:
         existing = self._reminder_bubbles.get(reminder.id)
@@ -431,6 +564,17 @@ class PetWindow(QLabel):
         menu.addAction(memory_action)
         menu.addSeparator()
 
+        topmost_action = QAction("始终置顶", menu)
+        topmost_action.setCheckable(True)
+        topmost_action.setChecked(self._window_state.always_on_top)
+        topmost_action.triggered.connect(self.set_always_on_top)
+        menu.addAction(topmost_action)
+
+        hide_action = QAction("隐藏到托盘", menu)
+        hide_action.triggered.connect(self.hide_to_tray)
+        menu.addAction(hide_action)
+        menu.addSeparator()
+
         exit_action = QAction("退出", menu)
         exit_action.triggered.connect(QApplication.instance().quit)
         menu.addAction(exit_action)
@@ -443,6 +587,18 @@ class PetWindow(QLabel):
     def set_reminding(self, active: bool) -> None:
         """Reserved integration point for a future reminder manager."""
         self._state_controller.set_reminding(active)
+
+    @property
+    def always_on_top(self) -> bool:
+        return self._window_state.always_on_top
+
+    @property
+    def tray_icon(self) -> QSystemTrayIcon | None:
+        return self._tray_icon
+
+    @property
+    def tray_menu(self) -> QMenu | None:
+        return self._tray_menu
 
     @property
     def animation_state(self) -> str:
@@ -481,14 +637,6 @@ class PetWindow(QLabel):
         return self._memory_service
 
     @property
-    def word_learning_window(self) -> WordLearningWindow | None:
-        return self._word_learning_window
-
-    @property
-    def word_learning_service(self) -> WordLearningService | None:
-        return self._word_learning_service
-
-    @property
     def reminder_dialogs(self) -> tuple[ReminderBubble, ...]:
         """Phase 3/4 compatibility alias for the active reminder surface."""
         return tuple(self._reminder_bubbles.values())
@@ -501,6 +649,8 @@ class PetWindow(QLabel):
         self._animation_manager.stop()
         self._reminder_manager.stop()
         self._reminder_manager.clear_queue()
+        if self._tray_icon is not None:
+            self._tray_icon.hide()
         if self._todo_window is not None:
             self._todo_window.hide()
         if self._chat_window is not None:
@@ -509,12 +659,8 @@ class PetWindow(QLabel):
             self._profile_window.hide()
         if self._memory_window is not None:
             self._memory_window.hide()
-        if self._word_learning_window is not None:
-            self._word_learning_window.hide()
         if self._memory_service is not None:
             self._memory_service.close()
-        if self._word_learning_service is not None:
-            self._word_learning_service.close()
         for bubble in list(self._reminder_bubbles.values()):
             bubble.close()
         self._reminder_bubbles.clear()

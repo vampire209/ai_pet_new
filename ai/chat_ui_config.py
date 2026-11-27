@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import sys
 
-from PySide6.QtCore import QStandardPaths
+from app_paths import chat_ui_config_path
 
 
 SUPPORTED_BACKGROUND_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp"})
@@ -18,11 +18,7 @@ class ChatUiSettingsError(RuntimeError):
 
 
 def default_chat_ui_config_path() -> Path:
-    root = QStandardPaths.writableLocation(
-        QStandardPaths.StandardLocation.GenericConfigLocation
-    )
-    base = Path(root) if root else Path.home() / ".config"
-    return base / "ai_pet_new" / "chat_ui.json"
+    return chat_ui_config_path()
 
 
 @dataclass(slots=True)

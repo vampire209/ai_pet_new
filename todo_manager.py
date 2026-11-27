@@ -9,8 +9,7 @@ import sys
 from datetime import datetime
 from typing import Callable, Iterable
 
-from PySide6.QtCore import QStandardPaths
-
+from app_paths import tasks_data_path
 from config import PROJECT_ROOT
 from models.task import Task, TaskDataError, new_task_id
 
@@ -25,22 +24,29 @@ class TodoStorageError(RuntimeError):
     """A user-visible persistence failure."""
 
 
-def default_tasks_data_path() -> Path:
-    """Keep packaged writes out of PyInstaller's read-only/temporary bundle."""
+def legacy_tasks_data_path() -> Path:
+    """Previous source-mode location kept only for one-time automatic migration."""
 
-    if not getattr(sys, "frozen", False):
-        return PROJECT_ROOT / "data" / "tasks.json"
-    root = QStandardPaths.writableLocation(
-        QStandardPaths.StandardLocation.GenericConfigLocation
-    )
-    base = Path(root) if root else Path.home() / ".config"
-    return base / "ai_pet_new" / "tasks.json"
+    return PROJECT_ROOT / "data" / "tasks.json"
+
+
+def default_tasks_data_path() -> Path:
+    """Use the unified per-user data directory for both source and packaged runs."""
+
+    return tasks_data_path()
 
 
 class TodoManager:
     """Own task state and save each mutation atomically to local JSON."""
 
-    def __init__(self, data_path: Path | str | None = None) -> None:
+    def __init__(
+        self,
+        data_path: Path | str | None = None,
+        *,
+        migrate_legacy: bool = True,
+    ) -> None:
+        self._using_default_path = data_path is None
+        self._migrate_legacy = migrate_legacy and self._using_default_path
         self._data_path = (
             Path(data_path) if data_path else default_tasks_data_path()
         )
@@ -57,9 +63,32 @@ class TodoManager:
         try:
             self._data_path.parent.mkdir(parents=True, exist_ok=True)
             if not self._data_path.exists():
+                if self._migrate_legacy and self._try_migrate_legacy_tasks():
+                    return
                 self._write_tasks([])
         except OSError as exc:
             raise TodoStorageError(f"无法初始化待办数据文件：{exc}") from exc
+
+    def _try_migrate_legacy_tasks(self) -> bool:
+        legacy_path = legacy_tasks_data_path()
+        if legacy_path.resolve() == self._data_path.resolve() or not legacy_path.is_file():
+            return False
+        try:
+            raw_text = legacy_path.read_text(encoding="utf-8")
+        except OSError:
+            return False
+        if not raw_text.strip():
+            return False
+        try:
+            parsed = json.loads(raw_text)
+        except json.JSONDecodeError:
+            return False
+        if not isinstance(parsed, list):
+            return False
+        temporary_path = self._data_path.with_suffix(self._data_path.suffix + ".tmp")
+        temporary_path.write_text(raw_text, encoding="utf-8")
+        temporary_path.replace(self._data_path)
+        return True
 
     def _load(self) -> None:
         try:

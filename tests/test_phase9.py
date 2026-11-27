@@ -743,7 +743,7 @@ class Phase9Tests(unittest.TestCase):
         self.assertIn("Enter 发送", window.findChild(QLabel, "chatInputHint").text())
         self.assertEqual(
             [action.text() for action in window.header_menu.actions()],
-            ["清空聊天", "", "更换聊天背景", "恢复默认背景"],
+            ["AI 接口设置", "", "清空聊天", "", "更换聊天背景", "恢复默认背景"],
         )
         window.shutdown()
 

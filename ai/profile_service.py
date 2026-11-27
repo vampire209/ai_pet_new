@@ -7,9 +7,10 @@ import json
 from pathlib import Path
 import sys
 
-from PySide6.QtCore import QObject, QStandardPaths, Signal
+from PySide6.QtCore import QObject, Signal
 
 from ai.profile import PetProfile
+from app_paths import profile_config_path
 
 
 class ProfileStorageError(RuntimeError):
@@ -17,11 +18,7 @@ class ProfileStorageError(RuntimeError):
 
 
 def default_profile_config_path() -> Path:
-    root = QStandardPaths.writableLocation(
-        QStandardPaths.StandardLocation.GenericConfigLocation
-    )
-    base = Path(root) if root else Path.home() / ".config"
-    return base / "ai_pet_new" / "profile.json"
+    return profile_config_path()
 
 
 @dataclass(frozen=True, slots=True)

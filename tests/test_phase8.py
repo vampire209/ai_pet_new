@@ -399,7 +399,7 @@ class Phase8Tests(unittest.TestCase):
             menu = pet._create_context_menu()
             self.assertEqual(
                 [action.text() for action in menu.actions()],
-                ["打开待办", "AI聊天", "桌宠设置", "记忆管理", "", "退出"],
+                ["打开待办", "AI聊天", "桌宠设置", "记忆管理", "", "始终置顶", "隐藏到托盘", "", "退出"],
             )
             menu.actions()[1].trigger()
             self.app.processEvents()

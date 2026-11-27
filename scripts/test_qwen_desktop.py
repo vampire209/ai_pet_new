@@ -35,7 +35,6 @@ def main():
     from pet_window import PetWindow
     from todo_manager import TodoManager
     from voice.runtime import create_desktop_voice_service
-    from word_learning.service import WordLearningService
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     report = {'status': 'running', 'real_chat_api_called': False,
@@ -44,16 +43,16 @@ def main():
     app.setQuitOnLastWindowClosed(False)
     temporary = tempfile.TemporaryDirectory()
     root = Path(temporary.name)
-    memory, words = MemoryService(':memory:'), WordLearningService(':memory:')
+    memory = MemoryService(':memory:')
     profiles, todos = ProfileService(root / 'profile.json'), TodoManager(root / 'tasks.json')
     voice = create_desktop_voice_service()
     voice.configure(replace(voice.settings, enable_voice_reply=True, volume=.35))
     fake = FakeDeepSeekClient((('这是新消息的回复。',),))
     chat = ChatWindow(ChatService(client=fake), voice_service=voice,
                       profile_service=profiles, todo_manager=todos, memory_service=memory,
-                      word_learning_service=words, ui_settings=ChatUiSettings(root / 'chat.json'))
+                      ui_settings=ChatUiSettings(root / 'chat.json'))
     pet = PetWindow(AppConfig.load(), todos, profile_service=profiles,
-                    memory_service=memory, word_learning_service=words)
+                    memory_service=memory)
     if args.show:
         pet.show()
         chat.show()
@@ -250,7 +249,6 @@ def main():
         report['all_recorded_children_exited'] = all(process.poll() is not None for process in processes)
         report['recorded_child_count'] = len(processes)
         memory.close()
-        words.close()
         app.processEvents()
         temporary.cleanup()
         (args.output_dir / 'desktop_report.json').write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')

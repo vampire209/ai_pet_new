@@ -5,8 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from ai.ability_modes import ABILITY_DEFAULT, normalize_ability_mode
-
 
 DEFAULT_PET_NAME = "桌宠"
 PET_NAME_MAX_LENGTH = 24
@@ -129,7 +127,6 @@ def preset_values(mode: str) -> dict[str, int]:
 class PetProfile:
     pet_name: str = DEFAULT_PET_NAME
     relationship_mode: str = RELATIONSHIP_NORMAL
-    ability_mode: str = ABILITY_DEFAULT
     gentleness: int = 65
     clinginess: int = 20
     coquetry: int = 20
@@ -141,11 +138,6 @@ class PetProfile:
         object.__setattr__(self, "pet_name", validate_pet_name(self.pet_name))
         if self.relationship_mode not in RELATIONSHIP_MODES:
             raise ProfileValidationError("未知的关系模式。")
-        object.__setattr__(
-            self,
-            "ability_mode",
-            normalize_ability_mode(self.ability_mode),
-        )
         for field in TRAIT_FIELDS:
             object.__setattr__(
                 self,
@@ -177,7 +169,6 @@ class PetProfile:
         return cls(
             pet_name=name,
             relationship_mode=mode,
-            ability_mode=normalize_ability_mode(raw.get("ability_mode")),
             **values,
         )
 
@@ -187,12 +178,10 @@ class PetProfile:
         relationship_mode: str,
         *,
         pet_name: str = DEFAULT_PET_NAME,
-        ability_mode: str = ABILITY_DEFAULT,
     ) -> "PetProfile":
         return cls(
             pet_name=pet_name,
             relationship_mode=relationship_mode,
-            ability_mode=ability_mode,
             **preset_values(relationship_mode),
         )
 
@@ -200,6 +189,5 @@ class PetProfile:
         return {
             "pet_name": self.pet_name,
             "relationship_mode": self.relationship_mode,
-            "ability_mode": self.ability_mode,
             **{field: getattr(self, field) for field in TRAIT_FIELDS},
         }

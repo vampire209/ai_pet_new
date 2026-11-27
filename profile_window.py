@@ -1,4 +1,4 @@
-"""Blue-lavender settings window for the independent desktop-pet profile."""
+"""Blue-lavender settings window for desktop-pet profile and AI connection."""
 
 from __future__ import annotations
 
@@ -12,11 +12,19 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QSlider,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
-from ai.ability_modes import ABILITY_MODE_LABELS
+from ai.ai_config import DEFAULT_BASE_URL, DEFAULT_MODEL
+from ai.ai_settings_service import (
+    AiConnectionSettings,
+    AiSettingsService,
+    AiSettingsStorageError,
+    AiSettingsValidationError,
+    PRESET_MODELS,
+)
 from ai.profile import (
     DEFAULT_PET_NAME,
     PET_NAME_MAX_LENGTH,
@@ -40,7 +48,23 @@ QWidget#profileWindow {
     font-family: "Microsoft YaHei UI", "Microsoft YaHei";
     font-size: 13px;
 }
-QFrame#profilePanel {
+QTabWidget#settingsTabs::pane {
+    border: none;
+    background: transparent;
+}
+QTabWidget#settingsTabs QTabBar::tab {
+    background: #e7ecfa;
+    color: #5b6784;
+    border-radius: 10px;
+    padding: 8px 18px;
+    margin-right: 8px;
+    font-weight: 600;
+}
+QTabWidget#settingsTabs QTabBar::tab:selected {
+    background: #8594d7;
+    color: white;
+}
+QFrame#profilePanel, QFrame#aiSettingsPanel {
     background: rgba(255, 255, 255, 238);
     border: 1px solid #d9dff1;
     border-radius: 18px;
@@ -96,12 +120,12 @@ QPushButton {
     padding: 0 18px;
     font-weight: 600;
 }
-QPushButton#restoreProfileButton {
+QPushButton#restoreProfileButton, QPushButton#resetAiButton, QPushButton#toggleApiKeyButton {
     color: #67728e;
     background: #edf0fa;
     border: 1px solid #d4daec;
 }
-QPushButton#saveProfileButton {
+QPushButton#saveProfileButton, QPushButton#saveAiButton {
     color: white;
     background: #8594d7;
     border: 1px solid #7685cb;
@@ -109,25 +133,28 @@ QPushButton#saveProfileButton {
 QPushButton:hover {
     background: #9ba8df;
 }
-QLabel#profileSaveStatus[error="true"] {
+QLabel#profileSaveStatus[error="true"], QLabel#aiSaveStatus[error="true"] {
     color: #c55d72;
 }
-QLabel#profileSaveStatus[error="false"] {
+QLabel#profileSaveStatus[error="false"], QLabel#aiSaveStatus[error="false"] {
     color: #668a7b;
 }
 """
 
 
 class ProfileWindow(QWidget):
-    """Edit a working copy and persist only when Save is explicitly used."""
+    """Edit pet profile and AI connection settings, saving only on explicit Save."""
 
     def __init__(
         self,
         profile_service: ProfileService,
         parent: QWidget | None = None,
+        *,
+        ai_settings_service: AiSettingsService | None = None,
     ) -> None:
         super().__init__(parent)
         self._profile_service = profile_service
+        self._ai_settings_service = ai_settings_service
         self._updating_controls = False
         self._last_preset_mode = RELATIONSHIP_NORMAL
         self.sliders: dict[str, QSlider] = {}
@@ -135,13 +162,20 @@ class ProfileWindow(QWidget):
         self._setup_ui()
         self._load_profile(profile_service.profile)
         profile_service.profile_changed.connect(self._load_profile)
+        if ai_settings_service is not None:
+            self._load_ai_settings(ai_settings_service.settings)
+            ai_settings_service.settings_changed.connect(self._load_ai_settings)
+        else:
+            self._load_ai_settings(AiConnectionSettings())
+            self.save_ai_button.setEnabled(False)
+            self._show_ai_status("当前窗口未连接 AI 设置服务。", error=False)
 
     def _setup_ui(self) -> None:
         self.setObjectName("profileWindow")
         self.setWindowTitle("桌宠设置")
         self.setWindowIcon(load_application_icon())
-        self.setMinimumSize(500, 740)
-        self.resize(540, 780)
+        self.setMinimumSize(500, 700)
+        self.resize(540, 740)
         self.setStyleSheet(PROFILE_WINDOW_STYLE)
 
         root = QVBoxLayout(self)
@@ -151,10 +185,22 @@ class ProfileWindow(QWidget):
         title = QLabel("桌宠设置")
         title.setObjectName("profileTitle")
         root.addWidget(title)
-        subtitle = QLabel("名字、关系与能力设置会在保存后立即影响下一次聊天。")
+        subtitle = QLabel("名字、性格与 AI 接口设置会在保存后立即生效。")
         subtitle.setObjectName("profileSubtitle")
         subtitle.setWordWrap(True)
         root.addWidget(subtitle)
+
+        self.tabs = QTabWidget()
+        self.tabs.setObjectName("settingsTabs")
+        self.tabs.addTab(self._build_profile_tab(), "角色与人格")
+        self.tabs.addTab(self._build_ai_tab(), "AI 接口设置")
+        root.addWidget(self.tabs, 1)
+
+    def _build_profile_tab(self) -> QWidget:
+        page = QWidget()
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 10, 0, 0)
+        page_layout.setSpacing(12)
 
         panel = QFrame()
         panel.setObjectName("profilePanel")
@@ -178,13 +224,6 @@ class ProfileWindow(QWidget):
             self._on_relationship_changed
         )
         panel_layout.addWidget(self.relationship_combo)
-
-        panel_layout.addWidget(self._field_label("能力模式"))
-        self.ability_combo = QComboBox()
-        self.ability_combo.setObjectName("profileAbilityCombo")
-        for ability_mode, label in ABILITY_MODE_LABELS.items():
-            self.ability_combo.addItem(label, ability_mode)
-        panel_layout.addWidget(self.ability_combo)
 
         hint = QLabel("手动调整任意滑杆后，关系模式会切换为“自定义”。")
         hint.setObjectName("profileHint")
@@ -213,12 +252,12 @@ class ProfileWindow(QWidget):
             self.sliders[field] = slider
             self.value_labels[field] = value_label
 
-        root.addWidget(panel, 1)
+        page_layout.addWidget(panel, 1)
 
         self.status_label = QLabel("")
         self.status_label.setObjectName("profileSaveStatus")
         self.status_label.setMinimumHeight(20)
-        root.addWidget(self.status_label)
+        page_layout.addWidget(self.status_label)
 
         buttons = QHBoxLayout()
         self.restore_button = QPushButton("恢复该模式默认值")
@@ -230,7 +269,115 @@ class ProfileWindow(QWidget):
         self.save_button.setObjectName("saveProfileButton")
         self.save_button.clicked.connect(self.save_settings)
         buttons.addWidget(self.save_button)
-        root.addLayout(buttons)
+        page_layout.addLayout(buttons)
+        return page
+
+    def _build_ai_tab(self) -> QWidget:
+        page = QWidget()
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 10, 0, 0)
+        page_layout.setSpacing(12)
+
+        panel = QFrame()
+        panel.setObjectName("aiSettingsPanel")
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(20, 18, 20, 20)
+        panel_layout.setSpacing(14)
+
+        panel_layout.addWidget(self._field_label("DeepSeek API Key"))
+        key_row = QHBoxLayout()
+        key_row.setSpacing(8)
+        self.api_key_edit = QLineEdit()
+        self.api_key_edit.setObjectName("aiApiKeyEdit")
+        self.api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.api_key_edit.setPlaceholderText("留空则自动读取环境变量 DEEPSEEK_API_KEY")
+        key_row.addWidget(self.api_key_edit, 1)
+
+        self.toggle_api_key_button = QPushButton("显示")
+        self.toggle_api_key_button.setObjectName("toggleApiKeyButton")
+        self.toggle_api_key_button.setCheckable(True)
+        self.toggle_api_key_button.toggled.connect(self._toggle_api_key_visibility)
+        key_row.addWidget(self.toggle_api_key_button)
+        panel_layout.addLayout(key_row)
+
+        panel_layout.addWidget(self._field_label("API Base URL"))
+        self.base_url_edit = QLineEdit()
+        self.base_url_edit.setObjectName("aiBaseUrlEdit")
+        self.base_url_edit.setPlaceholderText(DEFAULT_BASE_URL)
+        panel_layout.addWidget(self.base_url_edit)
+
+        panel_layout.addWidget(self._field_label("模型名称"))
+        self.model_combo = QComboBox()
+        self.model_combo.setObjectName("aiModelCombo")
+        self.model_combo.setEditable(True)
+        for model_name in PRESET_MODELS:
+            self.model_combo.addItem(model_name)
+        panel_layout.addWidget(self.model_combo)
+
+        ai_hint = QLabel(
+            "API Key 仅保存在本机用户配置目录（不会写入项目仓库或日志）。\n"
+            "保存后无需重启桌宠，下一次聊天立即生效。"
+        )
+        ai_hint.setObjectName("profileHint")
+        ai_hint.setWordWrap(True)
+        panel_layout.addWidget(ai_hint)
+        panel_layout.addStretch(1)
+
+        page_layout.addWidget(panel, 1)
+
+        self.ai_status_label = QLabel("")
+        self.ai_status_label.setObjectName("aiSaveStatus")
+        self.ai_status_label.setMinimumHeight(20)
+        page_layout.addWidget(self.ai_status_label)
+
+        buttons = QHBoxLayout()
+        self.reset_ai_button = QPushButton("恢复默认接口")
+        self.reset_ai_button.setObjectName("resetAiButton")
+        self.reset_ai_button.clicked.connect(self.reset_ai_defaults)
+        buttons.addWidget(self.reset_ai_button)
+        buttons.addStretch(1)
+        self.save_ai_button = QPushButton("保存 AI 设置")
+        self.save_ai_button.setObjectName("saveAiButton")
+        self.save_ai_button.clicked.connect(self.save_ai_settings)
+        buttons.addWidget(self.save_ai_button)
+        page_layout.addLayout(buttons)
+        return page
+
+    def open_tab(self, tab: str = "profile") -> None:
+        self.tabs.setCurrentIndex(1 if tab == "ai" else 0)
+
+    def _toggle_api_key_visibility(self, visible: bool) -> None:
+        self.api_key_edit.setEchoMode(
+            QLineEdit.EchoMode.Normal if visible else QLineEdit.EchoMode.Password
+        )
+        self.toggle_api_key_button.setText("隐藏" if visible else "显示")
+
+    def _load_ai_settings(self, settings: AiConnectionSettings) -> None:
+        self.api_key_edit.setText(settings.api_key)
+        self.base_url_edit.setText(settings.base_url)
+        self.model_combo.setCurrentText(settings.model)
+
+    def reset_ai_defaults(self) -> None:
+        self.base_url_edit.setText(DEFAULT_BASE_URL)
+        self.model_combo.setCurrentText(DEFAULT_MODEL)
+        self._show_ai_status("已填入默认地址和模型，点击保存后生效。", error=False)
+
+    def save_ai_settings(self) -> bool:
+        if self._ai_settings_service is None:
+            self._show_ai_status("AI 设置服务不可用。", error=True)
+            return False
+        try:
+            settings = AiConnectionSettings(
+                api_key=self.api_key_edit.text(),
+                base_url=self.base_url_edit.text(),
+                model=self.model_combo.currentText(),
+            )
+            self._ai_settings_service.save(settings)
+        except (AiSettingsValidationError, AiSettingsStorageError, OSError) as exc:
+            self._show_ai_status(str(exc), error=True)
+            return False
+        self._show_ai_status("AI 接口设置已保存，下一次聊天立即生效。", error=False)
+        return True
 
     @staticmethod
     def _field_label(text: str) -> QLabel:
@@ -244,8 +391,6 @@ class ProfileWindow(QWidget):
             self.name_edit.setText(profile.pet_name)
             index = self.relationship_combo.findData(profile.relationship_mode)
             self.relationship_combo.setCurrentIndex(max(0, index))
-            ability_index = self.ability_combo.findData(profile.ability_mode)
-            self.ability_combo.setCurrentIndex(max(0, ability_index))
             if profile.relationship_mode != RELATIONSHIP_CUSTOM:
                 self._last_preset_mode = profile.relationship_mode
             for field in TRAIT_FIELDS:
@@ -302,7 +447,6 @@ class ProfileWindow(QWidget):
         return PetProfile(
             pet_name=self.name_edit.text(),
             relationship_mode=self.relationship_combo.currentData(),
-            ability_mode=self.ability_combo.currentData(),
             **{field: slider.value() for field, slider in self.sliders.items()},
         )
 
@@ -323,12 +467,25 @@ class ProfileWindow(QWidget):
         style.polish(self.status_label)
         self.status_label.setText(message)
 
+    def _show_ai_status(self, message: str, *, error: bool) -> None:
+        self.ai_status_label.setProperty("error", error)
+        style = self.ai_status_label.style()
+        style.unpolish(self.ai_status_label)
+        style.polish(self.ai_status_label)
+        self.ai_status_label.setText(message)
+
     @property
     def profile_service(self) -> ProfileService:
         return self._profile_service
 
+    @property
+    def ai_settings_service(self) -> AiSettingsService | None:
+        return self._ai_settings_service
+
     def showEvent(self, event: QShowEvent) -> None:
         self._load_profile(self._profile_service.profile)
+        if self._ai_settings_service is not None:
+            self._load_ai_settings(self._ai_settings_service.settings)
         super().showEvent(event)
 
     def closeEvent(self, event: QCloseEvent) -> None:
