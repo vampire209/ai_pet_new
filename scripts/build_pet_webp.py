@@ -77,8 +77,9 @@ def key_out_solid_background(
     bg_color: tuple[int, int, int] | None = None,
     tolerance: float = 42.0,
     feather: float = 28.0,
+    remove_interior_holes: bool = True,
 ) -> Image.Image:
-    """Border-connected chroma keying with soft edge feathering and dehalo decontamination."""
+    """Chroma keying with border flood-fill, enclosed chroma-hole removal, and dehalo."""
     rgba = image.convert("RGBA")
     w, h = rgba.size
     if w == 0 or h == 0:
@@ -99,7 +100,7 @@ def key_out_solid_background(
     hard_limit = max(1.0, float(tolerance))
     soft_limit = hard_limit + max(1.0, float(feather))
 
-    # BFS flood-fill from outer border so interior pixels matching bg hue stay safe.
+    # BFS flood-fill from outer border (and optional enclosed chroma-colored hair gaps).
     visited = bytearray(w * h)
     bg_mask = bytearray(w * h)
     queue: deque[tuple[int, int]] = deque()
@@ -119,6 +120,21 @@ def key_out_solid_background(
     for y in range(h):
         try_seed(0, y)
         try_seed(w - 1, y)
+
+    # For clearly colored screens (green/blue screen), also seed enclosed background holes
+    # such as gaps between hair strands or arms.
+    key_chroma = max(key) - min(key)
+    if remove_interior_holes and key_chroma >= 28:
+        hole_seed_limit = min(hard_limit * 0.72, 28.0)
+        for y in range(1, h - 1):
+            row = y * w
+            for x in range(1, w - 1):
+                if visited[row + x]:
+                    continue
+                r, g, b, _a = pixels[x, y]
+                if _color_distance((r, g, b), key) <= hole_seed_limit:
+                    visited[row + x] = 1
+                    queue.append((x, y))
 
     while queue:
         x, y = queue.popleft()
