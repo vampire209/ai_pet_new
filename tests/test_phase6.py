@@ -9,6 +9,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -300,7 +301,10 @@ class Phase6Tests(unittest.TestCase):
             expected_records = [item.to_dict() for item in advanced.reminders]
             expected_last_completed = advanced.last_completed_at
 
-            restarted = TodoManager(path)
+            # Restart at the scenario's time, not weeks after its fixed date.
+            with patch("models.task.datetime", wraps=datetime) as clock:
+                clock.now.return_value = event
+                restarted = TodoManager(path)
             loaded = restarted.get_task(task.id)
             self.assertEqual(loaded.event_at, expected_event)
             self.assertEqual(loaded.last_completed_at, expected_last_completed)
@@ -308,7 +312,9 @@ class Phase6Tests(unittest.TestCase):
                 [item.to_dict() for item in loaded.reminders],
                 expected_records,
             )
-            restarted_again = TodoManager(path)
+            with patch("models.task.datetime", wraps=datetime) as clock:
+                clock.now.return_value = event
+                restarted_again = TodoManager(path)
             self.assertEqual(
                 [item.id for item in restarted_again.get_task(task.id).reminders],
                 [item.id for item in loaded.reminders],

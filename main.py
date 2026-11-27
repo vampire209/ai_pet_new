@@ -15,6 +15,8 @@ from memory.memory_store import MemoryStorageError
 from reminder_manager import ReminderManager
 from todo_manager import TodoManager, TodoStorageError
 from ui_resources import load_application_icon
+from word_learning.repository import WordLearningStorageError
+from word_learning.service import WordLearningService
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -44,12 +46,21 @@ def main(argv: list[str] | None = None) -> int:
     except MemoryStorageError as exc:
         print(f"[启动失败] {exc}", file=sys.stderr)
         return 1
+    try:
+        word_learning_service = WordLearningService(
+            ":memory:" if smoke_test else None
+        )
+    except WordLearningStorageError as exc:
+        print(f"[启动失败] {exc}", file=sys.stderr)
+        memory_service.close()
+        return 1
     pet = PetWindow(
         AppConfig.load(),
         todo_manager,
         reminder_manager,
         profile_service=profile_service,
         memory_service=memory_service,
+        word_learning_service=word_learning_service,
     )
     pet.show()
     reminder_manager.start(immediate=True)

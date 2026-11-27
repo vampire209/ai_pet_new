@@ -1,0 +1,16 @@
+# Phase 11C-2 dedicated Python 3.12 environment ONLY; never main requirements.
+# Install torch/torchaudio from https://download.pytorch.org/whl/cu128 first.
+torch==2.8.0+cu128
+torchaudio==2.8.0+cu128
+qwen-tts==0.1.1
+transformers==4.57.3
+accelerate==1.12.0
+huggingface-hub==0.36.2
+numpy==2.2.6
+soundfile==0.13.1
+librosa==0.11.0
+onnxruntime==1.23.2
+gradio==5.50.0
+einops==0.8.1
+sox==1.5.0
+psutil==7.0.0

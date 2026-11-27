@@ -6,6 +6,8 @@ build/
 build-*/
 dist/
 dist-*/
+dist_*/
+work/
 *.spec
 !AIPetNew.spec
 .env
@@ -15,3 +17,16 @@ tasks.json
 profile.json
 chat_ui.json
 data/tasks.json
+
+# Optional voice resources stay external; Phase 11A generates no audio files.
+/runtime/cache/voice/
+/runtime/cache/voice_demo/
+/runtime/voice_env/
+/runtime/voice_install/
+/models/qwen3_tts/
+/models/voice/
+/data/voice/reference/*
+!/data/voice/reference/README.md
+/runtime/cache/voice_demo_*/
+/runtime/cache/voice_desktop_*/
+/runtime/voice_changes_*_before/

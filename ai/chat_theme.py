@@ -88,6 +88,52 @@ QLabel#chatModelLabel {{
     padding: 3px 8px;
     font-size: 10px;
 }}
+QComboBox#chatAbilityCombo {{
+    min-height: 26px;
+    max-height: 26px;
+    min-width: 94px;
+    color: #666b98;
+    background: rgba(242, 241, 253, 205);
+    border: 1px solid rgba(201, 200, 232, 175);
+    border-radius: 9px;
+    padding: 0 8px;
+    font-size: 11px;
+}}
+QComboBox#chatAbilityCombo:hover,
+QComboBox#chatAbilityCombo:focus {{
+    border-color: rgba(143, 151, 211, 215);
+    background: rgba(248, 248, 255, 235);
+}}
+QComboBox#chatAbilityCombo:disabled {{
+    color: #a4a8b8;
+    background: rgba(241, 242, 247, 150);
+}}
+QComboBox#chatAbilityCombo::drop-down {{
+    width: 18px;
+    border: none;
+}}
+QComboBox#chatAbilityCombo QAbstractItemView {{
+    color: #4f5972;
+    background: #fbfbff;
+    border: 1px solid #d8ddef;
+    selection-color: #596aa6;
+    selection-background-color: #e5ebfb;
+    outline: 0;
+}}
+QPushButton#wordLearningButton {{
+    min-height: 27px;
+    max-height: 27px;
+    padding: 0 9px;
+    color: #626d9d;
+    background: rgba(235, 242, 255, 205);
+    border: 1px solid rgba(188, 202, 235, 185);
+    border-radius: 9px;
+    font-size: 11px;
+}}
+QPushButton#wordLearningButton:hover {{
+    color: #5665a0;
+    background: rgba(226, 235, 253, 235);
+}}
 QPushButton#headerClearButton {{
     min-width: 28px;
     max-width: 28px;
@@ -196,6 +242,67 @@ QLabel#userMessageText {{
     font-size: 14px;
     padding-bottom: 1px;
 }}
+QFrame#suggestedVocabularyCard {{
+    background: rgba(251, 252, 255, 240);
+    border: 1px solid rgba(181, 190, 229, 205);
+    border-radius: 17px;
+}}
+QWidget#suggestedVocabularyItem {{
+    background: rgba(242, 246, 255, 178);
+    border: 1px solid rgba(215, 222, 242, 170);
+    border-radius: 10px;
+}}
+QLabel#suggestedVocabularyHeading {{
+    color: #5f68a0;
+    font-size: 15px;
+    font-weight: 650;
+}}
+QLabel#suggestedVocabularyHint,
+QLabel#suggestedVocabularyMeaning,
+QLabel#suggestedVocabularyContext {{
+    color: #78839d;
+    font-size: 11px;
+}}
+QLabel#suggestedVocabularyContext {{
+    color: #59657f;
+    background: rgba(255, 255, 255, 175);
+    border-radius: 7px;
+    padding: 5px 7px;
+}}
+QLabel#suggestedVocabularyState,
+QLabel#suggestedVocabularyStatus {{
+    color: {THEME.success};
+    font-size: 11px;
+}}
+QCheckBox#suggestedVocabularyCheck {{
+    color: #3d4865;
+    font-size: 13px;
+    font-weight: 620;
+}}
+QPushButton#suggestedVocabularyContextButton,
+QPushButton#suggestedVocabularySecondaryButton {{
+    min-height: 24px;
+    padding: 1px 8px;
+    border-radius: 8px;
+    color: #727d99;
+    background: rgba(246, 248, 253, 210);
+    border: 1px solid #dce2ef;
+    font-size: 10px;
+}}
+QPushButton#suggestedVocabularyAddButton,
+QPushButton#suggestedVocabularyStudyButton {{
+    min-height: 30px;
+    border-radius: 10px;
+    color: white;
+    background: {THEME.primary};
+    border: 1px solid #6f80cf;
+    font-weight: 600;
+}}
+QPushButton#suggestedVocabularyAddButton:disabled {{
+    color: #7e8a9e;
+    background: #e5e9f1;
+    border-color: #d8deea;
+}}
 QFrame#todoConfirmationCard {{
     background: {THEME.todo_surface};
     border: 1px solid rgba(188, 178, 231, 205);
@@ -294,6 +401,23 @@ QPushButton#stopChatButton {{
     font-weight: 600;
 }}
 QPushButton#stopChatButton:hover {{ background: #fce9ee; }}
+QPushButton#voiceToggleButton, QPushButton#voicePreviewButton, QPushButton#voiceStopButton {{
+    min-height: 26px;
+    padding: 2px 10px;
+    font-size: 12px;
+    color: #69738b;
+    background: rgba(242, 244, 250, 210);
+    border: 1px solid #dce1ed;
+}}
+QPushButton#voiceToggleButton:checked {{
+    color: #5365a9;
+    background: #e4ecff;
+    border-color: #acbce8;
+}}
+QPushButton#voicePreviewButton:hover {{ background: #e9edf7; }}
+QPushButton#voiceStopButton:enabled {{ color: #95556a; background: #fff4f6; }}
+QPushButton#voiceStopButton:disabled {{ color: #abb0c1; }}
+QLabel#voiceStatusLabel {{ color: #7e85a0; font-size: 11px; }}
 QPushButton#cancelTodoButton {{
     color: #69738b;
     background: rgba(242, 244, 250, 210);

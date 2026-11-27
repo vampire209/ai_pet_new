@@ -496,7 +496,10 @@ class Phase9Tests(unittest.TestCase):
             send(window, "明天下午3点提醒我交作业，提前30分钟提醒")
             window.todo_cards[0].confirm_button.click()
             created = manager.get_tasks()[0]
-            reloaded = TodoManager(path).get_task(created.id)
+            # This tests an immediate restart, not an expired August reminder.
+            with patch("models.task.datetime", wraps=datetime) as clock:
+                clock.now.return_value = BASE
+                reloaded = TodoManager(path).get_task(created.id)
             self.assertIsNotNone(reloaded)
             self.assertEqual(reloaded.text, "交作业")
             self.assertEqual(reloaded.reminder_offsets, (30,))

@@ -29,6 +29,8 @@ from memory_window import MemoryManagerWindow
 from reminder_bubble import ReminderBubble
 from reminder_manager import ReminderManager
 from profile_window import ProfileWindow
+from word_learning.service import WordLearningService
+from word_learning.window import WordLearningWindow
 from todo_manager import TodoManager
 from todo_manager import TodoStorageError
 from todo_window import TodoWindow
@@ -46,6 +48,7 @@ class PetWindow(QLabel):
         chat_service: ChatService | None = None,
         profile_service: ProfileService | None = None,
         memory_service: MemoryService | None = None,
+        word_learning_service: WordLearningService | None = None,
     ) -> None:
         super().__init__(parent)
         self._config = config
@@ -58,6 +61,8 @@ class PetWindow(QLabel):
         self._profile_window: ProfileWindow | None = None
         self._memory_service = memory_service
         self._memory_window: MemoryManagerWindow | None = None
+        self._word_learning_service = word_learning_service
+        self._word_learning_window: WordLearningWindow | None = None
         self._reminder_bubbles: dict[str, ReminderBubble] = {}
         self._press_global: QPoint | None = None
         self._drag_offset = QPoint()
@@ -212,11 +217,19 @@ class PetWindow(QLabel):
 
     def _open_chat_window(self) -> None:
         if self._chat_window is None:
+            word_learning_service = self._ensure_word_learning_service()
             self._chat_window = ChatWindow(
                 self._chat_service or ChatService(),
                 todo_manager=self._todo_manager,
                 profile_service=self._profile_service,
                 memory_service=self._memory_service,
+                word_learning_service=word_learning_service,
+            )
+            self._chat_window.word_learning_requested.connect(
+                self._open_word_learning_window
+            )
+            self._chat_window.word_learning_words_requested.connect(
+                self._open_word_learning_words
             )
         if self._chat_window.isMinimized():
             state = self._chat_window.windowState() & ~Qt.WindowState.WindowMinimized
@@ -246,6 +259,46 @@ class PetWindow(QLabel):
         self._memory_window.show()
         self._memory_window.raise_()
         self._memory_window.activateWindow()
+
+    def _ensure_word_learning_service(self) -> WordLearningService:
+        if self._word_learning_service is None:
+            data_path = self._todo_manager.data_path.parent / "word_learning.db"
+            self._word_learning_service = WordLearningService(data_path)
+        return self._word_learning_service
+
+    def _open_word_learning_window(self, page: str = "today") -> None:
+        service = self._ensure_word_learning_service()
+        if self._word_learning_window is None:
+            self._word_learning_window = WordLearningWindow(
+                service,
+                profile_service=self._profile_service,
+                todo_manager=self._todo_manager,
+            )
+        self._word_learning_window.open_page(page)
+        if self._word_learning_window.isMinimized():
+            state = (
+                self._word_learning_window.windowState()
+                & ~Qt.WindowState.WindowMinimized
+            )
+            self._word_learning_window.setWindowState(
+                state | Qt.WindowState.WindowActive
+            )
+        self._word_learning_window.show()
+        self._word_learning_window.raise_()
+        self._word_learning_window.activateWindow()
+
+    def _open_word_learning_words(self, word_ids) -> None:
+        service = self._ensure_word_learning_service()
+        words = [
+            word
+            for word_id in tuple(word_ids)
+            if (word := service.get_word(str(word_id))) is not None
+        ]
+        if not words:
+            return
+        self._open_word_learning_window("today")
+        if self._word_learning_window is not None:
+            self._word_learning_window.start_session("reading", words=words)
 
     def _on_reminder_due(self, task: Task, reminder: Reminder) -> None:
         existing = self._reminder_bubbles.get(reminder.id)
@@ -428,6 +481,14 @@ class PetWindow(QLabel):
         return self._memory_service
 
     @property
+    def word_learning_window(self) -> WordLearningWindow | None:
+        return self._word_learning_window
+
+    @property
+    def word_learning_service(self) -> WordLearningService | None:
+        return self._word_learning_service
+
+    @property
     def reminder_dialogs(self) -> tuple[ReminderBubble, ...]:
         """Phase 3/4 compatibility alias for the active reminder surface."""
         return tuple(self._reminder_bubbles.values())
@@ -448,8 +509,12 @@ class PetWindow(QLabel):
             self._profile_window.hide()
         if self._memory_window is not None:
             self._memory_window.hide()
+        if self._word_learning_window is not None:
+            self._word_learning_window.hide()
         if self._memory_service is not None:
             self._memory_service.close()
+        if self._word_learning_service is not None:
+            self._word_learning_service.close()
         for bubble in list(self._reminder_bubbles.values()):
             bubble.close()
         self._reminder_bubbles.clear()

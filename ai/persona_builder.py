@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ai.ability_modes import build_ability_prompt
 from ai.persona import BASE_PERSONA_RULES
 from ai.profile import (
     PetProfile,
@@ -104,7 +105,7 @@ class PersonaBuilder:
                 _liveliness(profile.liveliness),
             )
         )
-        return (
+        base_and_relationship_prompt = (
             f"你名叫“{profile.pet_name}”，是住在 Windows 桌面上的 AI 桌宠。\n"
             f"关系身份：{_RELATIONSHIP_IDENTITIES[profile.relationship_mode]}\n"
             f"关系行为：{_RELATIONSHIP_BEHAVIORS[profile.relationship_mode]}\n"
@@ -115,6 +116,10 @@ class PersonaBuilder:
             "这些只是默认风格；用户当前对语气、严肃程度和回答形式的明确要求优先。\n"
             f"{BASE_PERSONA_RULES}"
         )
+        ability_prompt = build_ability_prompt(profile.ability_mode)
+        if not ability_prompt:
+            return base_and_relationship_prompt
+        return f"{base_and_relationship_prompt}\n\n{ability_prompt}"
 
 
 def build_system_persona(profile: PetProfile) -> str:

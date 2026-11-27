@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ai.ability_modes import ABILITY_MODE_LABELS
 from ai.profile import (
     DEFAULT_PET_NAME,
     PET_NAME_MAX_LENGTH,
@@ -139,8 +140,8 @@ class ProfileWindow(QWidget):
         self.setObjectName("profileWindow")
         self.setWindowTitle("桌宠设置")
         self.setWindowIcon(load_application_icon())
-        self.setMinimumSize(500, 690)
-        self.resize(540, 730)
+        self.setMinimumSize(500, 740)
+        self.resize(540, 780)
         self.setStyleSheet(PROFILE_WINDOW_STYLE)
 
         root = QVBoxLayout(self)
@@ -150,7 +151,7 @@ class ProfileWindow(QWidget):
         title = QLabel("桌宠设置")
         title.setObjectName("profileTitle")
         root.addWidget(title)
-        subtitle = QLabel("名字和相处风格会在保存后立即影响下一次聊天。")
+        subtitle = QLabel("名字、关系与能力设置会在保存后立即影响下一次聊天。")
         subtitle.setObjectName("profileSubtitle")
         subtitle.setWordWrap(True)
         root.addWidget(subtitle)
@@ -177,6 +178,13 @@ class ProfileWindow(QWidget):
             self._on_relationship_changed
         )
         panel_layout.addWidget(self.relationship_combo)
+
+        panel_layout.addWidget(self._field_label("能力模式"))
+        self.ability_combo = QComboBox()
+        self.ability_combo.setObjectName("profileAbilityCombo")
+        for ability_mode, label in ABILITY_MODE_LABELS.items():
+            self.ability_combo.addItem(label, ability_mode)
+        panel_layout.addWidget(self.ability_combo)
 
         hint = QLabel("手动调整任意滑杆后，关系模式会切换为“自定义”。")
         hint.setObjectName("profileHint")
@@ -236,6 +244,8 @@ class ProfileWindow(QWidget):
             self.name_edit.setText(profile.pet_name)
             index = self.relationship_combo.findData(profile.relationship_mode)
             self.relationship_combo.setCurrentIndex(max(0, index))
+            ability_index = self.ability_combo.findData(profile.ability_mode)
+            self.ability_combo.setCurrentIndex(max(0, ability_index))
             if profile.relationship_mode != RELATIONSHIP_CUSTOM:
                 self._last_preset_mode = profile.relationship_mode
             for field in TRAIT_FIELDS:
@@ -292,6 +302,7 @@ class ProfileWindow(QWidget):
         return PetProfile(
             pet_name=self.name_edit.text(),
             relationship_mode=self.relationship_combo.currentData(),
+            ability_mode=self.ability_combo.currentData(),
             **{field: slider.value() for field, slider in self.sliders.items()},
         )
 
@@ -323,4 +334,3 @@ class ProfileWindow(QWidget):
     def closeEvent(self, event: QCloseEvent) -> None:
         self.hide()
         event.ignore()
-

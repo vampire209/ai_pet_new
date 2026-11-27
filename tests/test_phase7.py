@@ -9,6 +9,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -332,7 +333,10 @@ class Phase7Tests(unittest.TestCase):
             saved = json.loads(path.read_text(encoding="utf-8"))[0]
             self.assertEqual(saved["text"], "交作业")
             self.assertEqual(saved["repeat_type"], REPEAT_NONE)
-            restarted = TodoManager(path).get_task(created.id)
+            # Keep deserialization on the same clock as the fixed-date parser.
+            with patch("models.task.datetime", wraps=datetime) as clock:
+                clock.now.return_value = self.base
+                restarted = TodoManager(path).get_task(created.id)
             self.assertEqual(restarted.event_at, created.event_at)
             self.assertEqual(
                 [item.to_dict() for item in restarted.reminders],
