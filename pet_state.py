@@ -17,11 +17,14 @@ def default_pet_state_path() -> Path:
 
 @dataclass(frozen=True, slots=True)
 class PetWindowState:
-    """Validated window position and topmost preference."""
+    """Validated window position, topmost, wandering, fullscreen yield, and character pack."""
 
     x: int | None = None
     y: int | None = None
     always_on_top: bool = True
+    wandering_enabled: bool = True
+    fullscreen_yield_enabled: bool = True
+    character_pack: str = "default"
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "PetWindowState":
@@ -33,14 +36,34 @@ class PetWindowState:
             x, y = None, None
         raw_top = raw.get("always_on_top", True)
         always_on_top = raw_top if isinstance(raw_top, bool) else True
-        return cls(x=x, y=y, always_on_top=always_on_top)
+        raw_wander = raw.get("wandering_enabled", True)
+        wandering_enabled = raw_wander if isinstance(raw_wander, bool) else True
+        raw_yield = raw.get("fullscreen_yield_enabled", True)
+        fullscreen_yield_enabled = raw_yield if isinstance(raw_yield, bool) else True
+        raw_pack = raw.get("character_pack", "default")
+        character_pack = (
+            raw_pack.strip()
+            if isinstance(raw_pack, str) and raw_pack.strip()
+            else "default"
+        )
+        return cls(
+            x=x,
+            y=y,
+            always_on_top=always_on_top,
+            wandering_enabled=wandering_enabled,
+            fullscreen_yield_enabled=fullscreen_yield_enabled,
+            character_pack=character_pack,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "version": 1,
+            "version": 2,
             "x": self.x,
             "y": self.y,
             "always_on_top": self.always_on_top,
+            "wandering_enabled": self.wandering_enabled,
+            "fullscreen_yield_enabled": self.fullscreen_yield_enabled,
+            "character_pack": self.character_pack,
         }
 
 

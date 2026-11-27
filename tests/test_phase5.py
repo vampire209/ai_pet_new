@@ -357,7 +357,12 @@ class Phase5Tests(unittest.TestCase):
             self.assertEqual(snooze.trigger_at, local_iso(base + timedelta(minutes=10)))
             self.assertFalse(updated.completed)
             self.assertEqual(pet.animation_state, "wait")
-            self.assertEqual(format_snooze_status(updated, now=base), f"稍后至 {snooze.trigger_datetime:%H:%M}")
+            expected_snooze = (
+                f"稍后至 {snooze.trigger_datetime:%H:%M}"
+                if snooze.trigger_datetime.date() == base.date()
+                else f"稍后至 {snooze.trigger_datetime.month}月{snooze.trigger_datetime.day}日 {snooze.trigger_datetime:%H:%M}"
+            )
+            self.assertEqual(format_snooze_status(updated, now=base), expected_snooze)
 
             todo = TodoWindow(manager)
             labels = todo.findChildren(QLabel, "snoozeStatusLabel")

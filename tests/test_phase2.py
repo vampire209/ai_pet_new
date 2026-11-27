@@ -280,7 +280,7 @@ class Phase2Tests(unittest.TestCase):
             menu_texts = [action.text() for action in pet._create_context_menu().actions()]
             self.assertEqual(
                 menu_texts,
-                ["打开待办", "AI聊天", "桌宠设置", "记忆管理", "", "始终置顶", "隐藏到托盘", "", "退出"],
+                ["打开待办", "AI聊天", "桌宠设置", "记忆管理", "", "外观与行为", "始终置顶", "隐藏到托盘", "", "退出"],
             )
             menu = pet._create_context_menu()
             menu.actions()[0].trigger()

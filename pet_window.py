@@ -1,19 +1,25 @@
-"""Transparent desktop pet with system tray, todo, chat, and queued reminders."""
+"""Transparent desktop pet with 24fps WebP engine, 60fps physics, wander, tray, and fullscreen yield."""
 
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 import sys
+import time
 
-from PySide6.QtCore import QPoint, QRect, Qt
+from PySide6.QtCore import QPoint, QRect, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QAction,
     QCloseEvent,
     QContextMenuEvent,
+    QDesktopServices,
     QMouseEvent,
+    QPainter,
+    QPaintEvent,
     QPixmap,
     QScreen,
     QShowEvent,
+    QTransform,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -30,12 +36,19 @@ from ai.deepseek_client import DeepSeekClient
 from ai.profile_service import ProfileService
 from animation_manager import AnimationManager
 from animation_state import AnimationStateController
+from app_paths import characters_dir
+from character_pack import (
+    CharacterPack,
+    DEFAULT_PACK_ID,
+    discover_character_packs,
+)
 from chat_window import ChatWindow
 from config import AppConfig
 from memory.memory_service import MemoryService
 from memory_window import MemoryManagerWindow
 from models.reminder import Reminder
 from models.task import Task, TaskDataError
+from pet_motion import PetMotionEngine, WanderController
 from pet_state import PetStateStore, PetWindowState
 from profile_window import ProfileWindow
 from reminder_bubble import ReminderBubble
@@ -43,11 +56,14 @@ from reminder_manager import ReminderManager
 from todo_manager import TodoManager, TodoStorageError
 from todo_window import TodoWindow
 from ui_resources import load_application_icon
+from video_yield import FullscreenYieldWatcher
 from voice.settings_store import VoiceSettingsStore
 
 
 class PetWindow(QLabel):
-    """Frameless pet window with system tray, topmost toggle, and saved position."""
+    """Frameless pet window with smooth 60fps micro-motion, wandering, tray, and character packs."""
+
+    pet_poked = Signal()
 
     def __init__(
         self,
@@ -62,6 +78,8 @@ class PetWindow(QLabel):
         chat_history_store: ChatHistoryStore | None = None,
         voice_settings_store: VoiceSettingsStore | None = None,
         state_store: PetStateStore | None = None,
+        character_packs: tuple[CharacterPack, ...] | None = None,
+        enable_fullscreen_watcher: bool | None = None,
     ) -> None:
         super().__init__(parent)
         self._config = config
@@ -81,15 +99,48 @@ class PetWindow(QLabel):
         self._window_state = (
             state_store.load() if state_store is not None else PetWindowState()
         )
+        self._fullscreen_yielded = False
         self._tray_icon: QSystemTrayIcon | None = None
         self._tray_menu: QMenu | None = None
         self._tray_toggle_action: QAction | None = None
         self._tray_topmost_action: QAction | None = None
+        self._tray_wander_action: QAction | None = None
+        self._tray_yield_action: QAction | None = None
         self._reminder_bubbles: dict[str, ReminderBubble] = {}
         self._press_global: QPoint | None = None
+        self._press_time: float = 0.0
+        self._last_drag_global: QPoint | None = None
+        self._last_drag_time: float = 0.0
         self._drag_offset = QPoint()
         self._dragging = False
         self._screen_signal_connected = False
+        self._current_pixmap: QPixmap = QPixmap()
+        self._missing_asset_text: str = ""
+
+        # Character packs
+        self._character_packs: tuple[CharacterPack, ...] = (
+            character_packs
+            if character_packs is not None
+            else discover_character_packs(animations_dir=config.animations_dir)
+        )
+        initial_pack = self._find_pack(self._window_state.character_pack)
+
+        # 60fps micro-motion & autonomous wandering
+        now = time.perf_counter()
+        self._motion = PetMotionEngine(start_time=now)
+        self._wander = WanderController(
+            enabled=self._window_state.wandering_enabled and (state_store is not None),
+        )
+        self._motion_timer = QTimer(self)
+        self._motion_timer.setInterval(33)
+        self._motion_timer.timeout.connect(self._on_motion_tick)
+
+        # Poke transient timer (ensures poke animation returns even on looped clips)
+        self._poke_clear_timer = QTimer(self)
+        self._poke_clear_timer.setSingleShot(True)
+        self._poke_clear_timer.timeout.connect(
+            lambda: self._state_controller.set_poking(False)
+        )
 
         self._setup_window()
         self._setup_tray()
@@ -100,6 +151,7 @@ class PetWindow(QLabel):
             config,
             device_pixel_ratio=initial_dpr,
             parent=self,
+            character_pack=initial_pack,
         )
         self._animation_manager.frame_changed.connect(self._show_frame)
         self._state_controller = AnimationStateController(
@@ -118,9 +170,62 @@ class PetWindow(QLabel):
             self._show_missing_asset_message()
         self._set_initial_position()
 
+        # Fullscreen auto-yield watcher (enabled in live app runs or when explicitly requested)
+        use_watcher = (
+            enable_fullscreen_watcher
+            if enable_fullscreen_watcher is not None
+            else (state_store is not None and sys.platform == "win32")
+        )
+        self._fullscreen_watcher = FullscreenYieldWatcher(
+            hwnd_provider=self._safe_hwnd,
+            parent=self,
+        )
+        self._fullscreen_watcher.set_enabled(self._window_state.fullscreen_yield_enabled)
+        self._fullscreen_watcher.fullscreen_changed.connect(self._on_fullscreen_changed)
+        if use_watcher:
+            self._fullscreen_watcher.start()
+
+        self._motion_timer.start()
+
+    def _safe_hwnd(self) -> int | None:
+        try:
+            return int(self.winId())
+        except Exception:
+            return None
+
+    def _find_pack(self, pack_id: str) -> CharacterPack:
+        for pack in self._character_packs:
+            if pack.pack_id == pack_id:
+                return pack
+        for pack in self._character_packs:
+            if pack.pack_id == DEFAULT_PACK_ID:
+                return pack
+        return self._character_packs[0]
+
+    def refresh_character_packs(self) -> tuple[CharacterPack, ...]:
+        self._character_packs = discover_character_packs(
+            animations_dir=self._config.animations_dir
+        )
+        return self._character_packs
+
+    def select_character_pack(self, pack_id: str) -> bool:
+        pack = self._find_pack(pack_id)
+        if pack.pack_id != pack_id and pack_id != DEFAULT_PACK_ID:
+            return False
+        ok = self._animation_manager.load_character_pack(pack)
+        self._window_state = replace(self._window_state, character_pack=pack.pack_id)
+        self._save_window_state()
+        self.update()
+        return ok
+
+    def _open_characters_folder(self) -> None:
+        target = characters_dir()
+        target.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
+
     def _setup_window(self) -> None:
         flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
-        if self._window_state.always_on_top:
+        if self._effective_topmost():
             flags |= Qt.WindowType.WindowStaysOnTopHint
         self.setWindowFlags(flags)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
@@ -129,7 +234,34 @@ class PetWindow(QLabel):
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setStyleSheet("background: transparent;")
         self.setCursor(Qt.CursorShape.OpenHandCursor)
-        self.setToolTip("按住左键拖动，双击打开待办，右键打开功能菜单")
+        self.setToolTip("轻点戳一戳，按住左键拖动，双击打开待办，右键打开功能菜单")
+
+    def _effective_topmost(self) -> bool:
+        if not self._window_state.always_on_top:
+            return False
+        if self._fullscreen_yielded and not self._reminder_bubbles:
+            return False
+        return True
+
+    def _apply_effective_topmost(self) -> None:
+        target = self._effective_topmost()
+        current = bool(self.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
+        if target == current:
+            return
+        was_visible = self.isVisible()
+        position = self.pos()
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, target)
+        if was_visible:
+            self.show()
+            self.move(position)
+            if target:
+                self.raise_()
+
+    def _on_fullscreen_changed(self, is_fullscreen: bool) -> None:
+        self._fullscreen_yielded = bool(
+            is_fullscreen and self._window_state.fullscreen_yield_enabled
+        )
+        self._apply_effective_topmost()
 
     def _setup_tray(self) -> None:
         menu = QMenu()
@@ -142,6 +274,18 @@ class PetWindow(QLabel):
         topmost_action.setChecked(self._window_state.always_on_top)
         topmost_action.triggered.connect(self.set_always_on_top)
         menu.addAction(topmost_action)
+
+        wander_action = QAction("自主漫步", menu)
+        wander_action.setCheckable(True)
+        wander_action.setChecked(self._window_state.wandering_enabled)
+        wander_action.triggered.connect(self.set_wandering_enabled)
+        menu.addAction(wander_action)
+
+        yield_action = QAction("全屏自动让位", menu)
+        yield_action.setCheckable(True)
+        yield_action.setChecked(self._window_state.fullscreen_yield_enabled)
+        yield_action.triggered.connect(self.set_fullscreen_yield_enabled)
+        menu.addAction(yield_action)
         menu.addSeparator()
 
         todo_action = QAction("打开待办", menu)
@@ -162,6 +306,12 @@ class PetWindow(QLabel):
         menu.addAction(memory_action)
         menu.addSeparator()
 
+        chars_menu = menu.addMenu("角色形象")
+        chars_menu.aboutToShow.connect(
+            lambda m=chars_menu: self._populate_character_menu(m)
+        )
+        menu.addSeparator()
+
         exit_action = QAction("退出", menu)
         exit_action.triggered.connect(QApplication.instance().quit)
         menu.addAction(exit_action)
@@ -169,6 +319,8 @@ class PetWindow(QLabel):
         self._tray_menu = menu
         self._tray_toggle_action = toggle_action
         self._tray_topmost_action = topmost_action
+        self._tray_wander_action = wander_action
+        self._tray_yield_action = yield_action
 
         if QSystemTrayIcon.isSystemTrayAvailable():
             tray = QSystemTrayIcon(load_application_icon(), self)
@@ -177,6 +329,23 @@ class PetWindow(QLabel):
             tray.activated.connect(self._on_tray_activated)
             tray.show()
             self._tray_icon = tray
+
+    def _populate_character_menu(self, menu: QMenu) -> None:
+        menu.clear()
+        packs = self.refresh_character_packs()
+        active_id = self._animation_manager.character_pack.pack_id
+        for pack in packs:
+            action = QAction(pack.name, menu)
+            action.setCheckable(True)
+            action.setChecked(pack.pack_id == active_id)
+            action.triggered.connect(
+                lambda _checked=False, pid=pack.pack_id: self.select_character_pack(pid)
+            )
+            menu.addAction(action)
+        menu.addSeparator()
+        open_dir = QAction("打开角色包目录…", menu)
+        open_dir.triggered.connect(self._open_characters_folder)
+        menu.addAction(open_dir)
 
     def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason in (
@@ -196,6 +365,12 @@ class PetWindow(QLabel):
             )
         if self._tray_topmost_action is not None:
             self._tray_topmost_action.setChecked(self._window_state.always_on_top)
+        if self._tray_wander_action is not None:
+            self._tray_wander_action.setChecked(self._window_state.wandering_enabled)
+        if self._tray_yield_action is not None:
+            self._tray_yield_action.setChecked(
+                self._window_state.fullscreen_yield_enabled
+            )
 
     def _save_window_state(self) -> None:
         if self._state_store is not None:
@@ -203,24 +378,37 @@ class PetWindow(QLabel):
 
     def set_always_on_top(self, enabled: bool) -> None:
         target = bool(enabled)
-        if target == self._window_state.always_on_top and bool(
-            self.windowFlags() & Qt.WindowType.WindowStaysOnTopHint
-        ) == target:
-            self._sync_tray_state()
-            return
-        was_visible = self.isVisible()
-        position = self.pos()
         self._window_state = replace(self._window_state, always_on_top=target)
-        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, target)
-        if was_visible:
-            self.show()
-            self.move(position)
-            if target:
-                self.raise_()
+        self._apply_effective_topmost()
+        self._save_window_state()
+        self._sync_tray_state()
+
+    def set_wandering_enabled(self, enabled: bool) -> None:
+        target = bool(enabled)
+        self._window_state = replace(self._window_state, wandering_enabled=target)
+        self._wander.set_enabled(target)
+        if not target:
+            self._motion.set_walking(False, time.perf_counter())
+            self._state_controller.set_walking(False)
+        self._save_window_state()
+        self._sync_tray_state()
+
+    def set_fullscreen_yield_enabled(self, enabled: bool) -> None:
+        target = bool(enabled)
+        self._window_state = replace(
+            self._window_state, fullscreen_yield_enabled=target
+        )
+        self._fullscreen_watcher.set_enabled(target)
+        if not target:
+            self._fullscreen_yielded = False
+        self._apply_effective_topmost()
         self._save_window_state()
         self._sync_tray_state()
 
     def hide_to_tray(self) -> None:
+        self._wander.cancel()
+        self._motion.set_walking(False, time.perf_counter())
+        self._state_controller.set_walking(False)
         self.hide()
         self._sync_tray_state()
 
@@ -236,23 +424,108 @@ class PetWindow(QLabel):
         else:
             self.show_from_tray()
 
+    def trigger_poke(self) -> None:
+        """Play 60fps elastic Q-bounce and optional poke action clip."""
+        now = time.perf_counter()
+        self._motion.trigger_poke(now)
+        self._motion_timer.setInterval(16)
+        if self._animation_manager.character_pack.clips_for("poke"):
+            self._state_controller.trigger_oneshot("poke")
+            self._poke_clear_timer.start(1600)
+        self.pet_poked.emit()
+        self.update()
+
+    def _on_motion_tick(self) -> None:
+        now = time.perf_counter()
+
+        # Autonomous wandering step
+        screen = QApplication.screenAt(self.geometry().center()) or QApplication.primaryScreen()
+        if screen is not None:
+            area = screen.availableGeometry()
+            min_x = area.left() + 8
+            max_x = max(min_x, area.right() - self.width() - 8)
+            allowed = (
+                self.isVisible()
+                and not self._dragging
+                and not self._reminder_bubbles
+                and self._state_controller.current_state in ("idle", "wait", "walk")
+            )
+            step = self._wander.tick(
+                now=now,
+                current_x=self.x(),
+                min_x=min_x,
+                max_x=max_x,
+                allowed=allowed,
+            )
+            if step is not None:
+                self._motion.set_facing(step.facing)
+                self._motion.set_walking(step.walking, now)
+                if step.walking:
+                    self._state_controller.set_walking(True)
+                    if step.x != self.x():
+                        self.move(step.x, self.y())
+                else:
+                    self._state_controller.set_walking(False)
+                    if step.arrived and step.x != self.x():
+                        self.move(step.x, self.y())
+                    if step.trigger_variant and self._animation_manager.character_pack.clips_for("variant"):
+                        self._state_controller.trigger_oneshot("variant")
+
+        # Adaptive timer rate: 60fps during active motion, gentle 30fps breathing otherwise
+        desired_interval = 16 if self._motion.needs_high_fps(now) else 33
+        if self._motion_timer.interval() != desired_interval:
+            self._motion_timer.setInterval(desired_interval)
+        if self.isVisible() and not self._current_pixmap.isNull():
+            self.update()
+
     def _show_frame(self, pixmap: QPixmap) -> None:
         if pixmap.isNull():
             return
-        self.setText("")
-        self.setPixmap(pixmap)
+        self._missing_asset_text = ""
+        self._current_pixmap = pixmap
         logical_size = pixmap.deviceIndependentSize().toSize()
         if not logical_size.isEmpty():
             self.setFixedSize(logical_size)
+        self.update()
 
     def _show_missing_asset_message(self) -> None:
-        self.clear()
-        self.setText("桌宠 idle 素材缺失")
+        self._current_pixmap = QPixmap()
+        self._missing_asset_text = "桌宠 idle 素材缺失"
+        self.setText(self._missing_asset_text)
         self.setStyleSheet(
             "background: rgba(40, 40, 40, 190); color: white; "
             "padding: 12px; border-radius: 8px;"
         )
         self.adjustSize()
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        if self._current_pixmap.isNull():
+            super().paintEvent(event)
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+
+        state = self._motion.sample(time.perf_counter())
+        rect = self.rect()
+        anchor_x = rect.width() * 0.5
+        anchor_y = float(rect.height())
+
+        transform = QTransform()
+        transform.translate(anchor_x, anchor_y + state.offset_y)
+        if abs(state.rotation_deg) >= 0.05:
+            transform.rotate(state.rotation_deg)
+        sx = state.scale_x * (1.0 if state.facing >= 0 else -1.0)
+        transform.scale(sx, state.scale_y)
+        transform.translate(-anchor_x, -anchor_y)
+
+        painter.setTransform(transform, True)
+        logical = self._current_pixmap.deviceIndependentSize()
+        draw_x = (rect.width() - logical.width()) * 0.5
+        draw_y = rect.height() - logical.height()
+        painter.drawPixmap(QPoint(int(round(draw_x)), int(round(draw_y))), self._current_pixmap)
+        painter.end()
 
     def _is_position_visible_on_any_screen(self, x: int, y: int) -> bool:
         width = max(1, self.width())
@@ -303,7 +576,11 @@ class PetWindow(QLabel):
         if event.button() != Qt.MouseButton.LeftButton:
             super().mousePressEvent(event)
             return
+        now = time.perf_counter()
         self._press_global = event.globalPosition().toPoint()
+        self._press_time = now
+        self._last_drag_global = self._press_global
+        self._last_drag_time = now
         self._drag_offset = self._press_global - self.pos()
         self._dragging = False
         event.accept()
@@ -316,6 +593,7 @@ class PetWindow(QLabel):
             super().mouseMoveEvent(event)
             return
 
+        now = time.perf_counter()
         current_global = event.globalPosition().toPoint()
         if not self._dragging:
             distance = (current_global - self._press_global).manhattanLength()
@@ -324,28 +602,48 @@ class PetWindow(QLabel):
                 event.accept()
                 return
             self._dragging = True
+            self._wander.cancel(now=now)
+            self._state_controller.set_walking(False)
+            self._motion.begin_drag(now)
+            self._motion_timer.setInterval(16)
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             self._state_controller.set_moving(True)
+
+        if self._last_drag_global is not None:
+            dx = float(current_global.x() - self._last_drag_global.x())
+            dt = max(0.008, now - self._last_drag_time)
+            self._motion.update_drag(dx, dt)
+        self._last_drag_global = current_global
+        self._last_drag_time = now
 
         self.move(current_global - self._drag_offset)
         for bubble in self._reminder_bubbles.values():
             self._position_bubble(bubble)
+        self.update()
         event.accept()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         if event.button() != Qt.MouseButton.LeftButton:
             super().mouseReleaseEvent(event)
             return
-        if self._dragging:
+        now = time.perf_counter()
+        was_dragging = self._dragging
+        press_global = self._press_global
+        press_time = self._press_time
+        if was_dragging:
             self._state_controller.set_moving(False)
+            self._motion.end_drag(now)
             self._window_state = replace(
                 self._window_state,
                 x=self.x(),
                 y=self.y(),
             )
             self._save_window_state()
+        elif press_global is not None and (now - press_time) < 0.35:
+            self.trigger_poke()
         self._dragging = False
         self._press_global = None
+        self._last_drag_global = None
         self.setCursor(Qt.CursorShape.OpenHandCursor)
         event.accept()
 
@@ -447,7 +745,11 @@ class PetWindow(QLabel):
         bubble.snooze_requested.connect(self._snooze_reminder)
         bubble.dismissed.connect(self._reminder_bubble_finished)
         self._reminder_bubbles[reminder.id] = bubble
+        self._wander.cancel()
+        self._state_controller.set_walking(False)
         self._state_controller.set_reminding(True)
+        # Unread reminder temporarily takes priority over fullscreen yield.
+        self._apply_effective_topmost()
         bubble.adjustSize()
         self._position_bubble(bubble)
         bubble.show()
@@ -513,6 +815,7 @@ class PetWindow(QLabel):
         bubble = self._reminder_bubbles.pop(reminder_id, None)
         self._reminder_manager.reminder_finished(reminder_id)
         self._state_controller.set_reminding(bool(self._reminder_bubbles))
+        self._apply_effective_topmost()
         if bubble is not None:
             bubble.deleteLater()
 
@@ -564,6 +867,23 @@ class PetWindow(QLabel):
         menu.addAction(memory_action)
         menu.addSeparator()
 
+        appearance_menu = menu.addMenu("外观与行为")
+        chars_menu = appearance_menu.addMenu("角色形象")
+        self._populate_character_menu(chars_menu)
+        appearance_menu.addSeparator()
+
+        wander_action = QAction("自主漫步", appearance_menu)
+        wander_action.setCheckable(True)
+        wander_action.setChecked(self._window_state.wandering_enabled)
+        wander_action.triggered.connect(self.set_wandering_enabled)
+        appearance_menu.addAction(wander_action)
+
+        yield_action = QAction("全屏自动让位", appearance_menu)
+        yield_action.setCheckable(True)
+        yield_action.setChecked(self._window_state.fullscreen_yield_enabled)
+        yield_action.triggered.connect(self.set_fullscreen_yield_enabled)
+        appearance_menu.addAction(yield_action)
+
         topmost_action = QAction("始终置顶", menu)
         topmost_action.setCheckable(True)
         topmost_action.setChecked(self._window_state.always_on_top)
@@ -591,6 +911,26 @@ class PetWindow(QLabel):
     @property
     def always_on_top(self) -> bool:
         return self._window_state.always_on_top
+
+    @property
+    def wandering_enabled(self) -> bool:
+        return self._window_state.wandering_enabled
+
+    @property
+    def fullscreen_yield_enabled(self) -> bool:
+        return self._window_state.fullscreen_yield_enabled
+
+    @property
+    def fullscreen_yielded(self) -> bool:
+        return self._fullscreen_yielded
+
+    @property
+    def motion_engine(self) -> PetMotionEngine:
+        return self._motion
+
+    @property
+    def active_character_pack(self) -> CharacterPack:
+        return self._animation_manager.character_pack
 
     @property
     def tray_icon(self) -> QSystemTrayIcon | None:
@@ -646,6 +986,9 @@ class PetWindow(QLabel):
         return tuple(self._reminder_bubbles.values())
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        self._motion_timer.stop()
+        self._poke_clear_timer.stop()
+        self._fullscreen_watcher.stop()
         self._animation_manager.stop()
         self._reminder_manager.stop()
         self._reminder_manager.clear_queue()

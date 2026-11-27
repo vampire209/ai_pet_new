@@ -12,7 +12,8 @@
 
 ## 最新体验与配置说明（2026-11-27）
 
-- **系统托盘与位置记忆**：支持托盘图标与右键切换「始终置顶」「隐藏到托盘」，重启自动恢复上次拖动位置。
+- **Phase 13 流畅动画与角色包引擎**：支持 **24fps 透明动态 WebP 流式解码** + `manifest.json` 角色包热切换（详见 [角色包与 24fps 动画制作指南](docs/character_pack_guide.md) 与一键脚本 [scripts/build_pet_webp.py](scripts/build_pet_webp.py)），新增 **60fps 呼吸起伏、左键戳一下 Q 弹回弹、拖拽物理摆锤、桌面自主漫步与镜像转身、视频全屏自动让位**。
+- **系统托盘与位置记忆**：支持托盘图标与右键切换「始终置顶」「隐藏到托盘」「自主漫步」「全屏自动让位」和「角色形象」，重启自动恢复上次拖动位置。
 - **图形化 AI 接口配置**：右键桌宠 →「桌宠设置 → AI 接口设置」（或聊天窗口右上角 `⋯` 菜单）可直接填写 DeepSeek API Key、Base URL 和模型名称并立即热生效；API Key 留空时仍自动回退读取 `DEEPSEEK_API_KEY` 环境变量。
 - **聊天与语音持久化**：多轮聊天记录、语音回复开关与声音来源重启后自动恢复。
 - **统一数据目录**：所有个人数据（`tasks.json`、`profile.json`、`memory.db`、`chat_history.json`、`voice_settings.json`、`ai_settings.json`、`pet_state.json`、`chat_ui.json`）统一保存在用户配置目录 `ai_pet_new/` 下，首次运行会自动迁移旧版 `data/tasks.json`。

@@ -54,3 +54,7 @@ def memory_db_path() -> Path:
 
 def user_app_config_path() -> Path:
     return user_data_dir() / "config.json"
+
+
+def characters_dir() -> Path:
+    return user_data_dir() / "characters"
