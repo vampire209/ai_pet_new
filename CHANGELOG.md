@@ -4,6 +4,17 @@
 
 ---
 
+## [2026-11-28] 24fps 高清渲染清晰度优化与素材管线增强
+
+- **24fps 原生流式动画 1:1 像素级锐利绘制（`pet_window.py`、`pet_motion.py`、`animation_manager.py`）**：
+  - 播放原生 24fps 多帧透明 WebP 动图时自动暂停程序化微呼吸缩放（仅在戳一下 Q 弹、拖拽晃动或转身翻转时启用形变），消除持续非整数重采样带来的线条发虚，并降低待机重绘开销。
+- **素材转换管线增强（`scripts/build_pet_webp.py`）**：
+  - 新增抗明暗渐变绿幕色度抠图（`--green-screen`）、闭合发缝蓝底去除与角落 AI 水印连通域清理。
+  - 新增单首帧视频无缝循环模式（`--loop-mode pingpong|crossfade`）与起止时间裁剪（`--start-sec` / `--end-sec`）。
+  - 新增动漫线条轻量锐化选项（`--sharpen`），配合 `--size 720 --lossless` 输出高清晰度透明动图。
+
+---
+
 ## [2026-11-27] Phase 13 · 流畅动画引擎、物理微动效、自主漫步与角色包体系
 
 参考「白龙桌宠增强版（`codex-bailong-desktop-pet`）」与「肥鱼陪聊（`feiyu-chat-companion`）」的动画与交互架构，全面升级桌宠渲染与动画系统：

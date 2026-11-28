@@ -34,3 +34,7 @@ data/tasks.json
 /runtime/cache/voice_demo_*/
 /runtime/cache/voice_desktop_*/
 /runtime/voice_changes_*_before/
+
+# Local custom character packs (large lossless WebP clips stay outside git)
+assets/characters/
+

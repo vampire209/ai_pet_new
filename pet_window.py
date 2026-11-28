@@ -471,11 +471,21 @@ class PetWindow(QLabel):
                     if step.trigger_variant and self._animation_manager.character_pack.clips_for("variant"):
                         self._state_controller.trigger_oneshot("variant")
 
+        # Disable artificial breathing scale on native 24fps animated clips so Qt renders
+        # every frame 1:1 pixel-sharp without continuous non-integer resampling blur.
+        self._motion.set_breathing_enabled(not self._animation_manager.is_streaming_high_fps)
+
         # Adaptive timer rate: 60fps during active motion, gentle 30fps breathing otherwise
-        desired_interval = 16 if self._motion.needs_high_fps(now) else 33
+        desired_interval = 16 if self._motion.needs_high_fps(now) else (
+            120 if self._animation_manager.is_streaming_high_fps else 33
+        )
         if self._motion_timer.interval() != desired_interval:
             self._motion_timer.setInterval(desired_interval)
-        if self.isVisible() and not self._current_pixmap.isNull():
+        if (
+            self.isVisible()
+            and not self._current_pixmap.isNull()
+            and (self._motion.needs_high_fps(now) or not self._animation_manager.is_streaming_high_fps)
+        ):
             self.update()
 
     def _show_frame(self, pixmap: QPixmap) -> None:
@@ -509,22 +519,23 @@ class PetWindow(QLabel):
 
         state = self._motion.sample(time.perf_counter())
         rect = self.rect()
-        anchor_x = rect.width() * 0.5
-        anchor_y = float(rect.height())
-
-        transform = QTransform()
-        transform.translate(anchor_x, anchor_y + state.offset_y)
-        if abs(state.rotation_deg) >= 0.05:
-            transform.rotate(state.rotation_deg)
-        sx = state.scale_x * (1.0 if state.facing >= 0 else -1.0)
-        transform.scale(sx, state.scale_y)
-        transform.translate(-anchor_x, -anchor_y)
-
-        painter.setTransform(transform, True)
         logical = self._current_pixmap.deviceIndependentSize()
-        draw_x = (rect.width() - logical.width()) * 0.5
-        draw_y = rect.height() - logical.height()
-        painter.drawPixmap(QPoint(int(round(draw_x)), int(round(draw_y))), self._current_pixmap)
+        draw_x = int(round((rect.width() - logical.width()) * 0.5))
+        draw_y = int(round(rect.height() - logical.height()))
+
+        if not state.is_identity:
+            anchor_x = rect.width() * 0.5
+            anchor_y = float(rect.height())
+            transform = QTransform()
+            transform.translate(anchor_x, anchor_y + state.offset_y)
+            if abs(state.rotation_deg) >= 0.05:
+                transform.rotate(state.rotation_deg)
+            sx = state.scale_x * (1.0 if state.facing >= 0 else -1.0)
+            transform.scale(sx, state.scale_y)
+            transform.translate(-anchor_x, -anchor_y)
+            painter.setTransform(transform, True)
+
+        painter.drawPixmap(QPoint(draw_x, draw_y), self._current_pixmap)
         painter.end()
 
     def _is_position_visible_on_any_screen(self, x: int, y: int) -> bool:

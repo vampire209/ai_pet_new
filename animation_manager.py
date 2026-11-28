@@ -282,6 +282,15 @@ class AnimationManager(QObject):
         self._current_index = 0
 
     @property
+    def is_streaming_high_fps(self) -> bool:
+        """True when playing a multi-frame animated WebP/GIF that has native motion."""
+        return (
+            self._current_clip is not None
+            and self._current_clip.kind == "animated"
+            and self._stream_player.frame_count > 1
+        )
+
+    @property
     def current_animation(self) -> str | None:
         return self._current_name
 

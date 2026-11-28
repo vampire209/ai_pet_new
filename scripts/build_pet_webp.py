@@ -24,7 +24,7 @@ import sys
 import tempfile
 from typing import Iterable
 
-from PIL import Image
+from PIL import Image, ImageFilter
 
 
 IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp", ".bmp"})
@@ -506,6 +506,17 @@ def apply_loop_mode(
     raise ValueError(f"不支持的循环模式：{loop_mode}")
 
 
+def sharpen_rgba(image: Image.Image) -> Image.Image:
+    """Gently sharpen anime lineart on RGB channels while preserving clean alpha."""
+    rgba = image.convert("RGBA")
+    r, g, b, a = rgba.split()
+    rgb = Image.merge("RGB", (r, g, b)).filter(
+        ImageFilter.UnsharpMask(radius=1.1, percent=120, threshold=3)
+    )
+    sr, sg, sb = rgb.split()
+    return Image.merge("RGBA", (sr, sg, sb, a))
+
+
 def convert_to_pet_webp(
     source: Path,
     output_path: Path,
@@ -519,6 +530,7 @@ def convert_to_pet_webp(
     feather: float = 28.0,
     quality: int = 86,
     lossless: bool = False,
+    sharpen: bool = False,
     loop_mode: str = "none",
     crossfade_frames: int = 8,
     start_sec: float | None = None,
@@ -547,6 +559,8 @@ def convert_to_pet_webp(
             for frame in raw_frames
         ]
     aligned = align_frames_to_canvas(processed, canvas_size=canvas_size)
+    if sharpen:
+        aligned = [sharpen_rgba(frame) for frame in aligned]
     looped = apply_loop_mode(
         aligned,
         loop_mode=loop_mode,
@@ -578,6 +592,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--no-key", action="store_true", help="源素材已透明，跳过纯色抠图")
     parser.add_argument("--quality", type=int, default=86, help="WebP 质量 1–100，默认 86")
     parser.add_argument("--lossless", action="store_true", help="使用无损透明 WebP")
+    parser.add_argument("--sharpen", action="store_true", help="对动漫线条做轻微锐化（抵消 MP4 压缩发虚）")
     parser.add_argument("--oneshot", action="store_true", help="标记为单次播放动作（不循环）")
     parser.add_argument("--start-sec", type=float, help="裁剪起始秒数")
     parser.add_argument("--end-sec", type=float, help="裁剪结束秒数")
@@ -607,6 +622,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         feather=args.feather,
         quality=args.quality,
         lossless=args.lossless,
+        sharpen=args.sharpen,
         loop_mode=args.loop_mode,
         crossfade_frames=args.crossfade_frames,
         start_sec=args.start_sec,

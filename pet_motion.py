@@ -51,6 +51,9 @@ class PetMotionEngine:
     def facing(self) -> int:
         return self._facing
 
+    def set_breathing_enabled(self, enabled: bool) -> None:
+        self._breathing_enabled = bool(enabled)
+
     def set_facing(self, facing: int) -> None:
         self._facing = -1 if facing < 0 else 1
 
