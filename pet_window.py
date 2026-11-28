@@ -43,6 +43,12 @@ from character_pack import (
     discover_character_packs,
 )
 from chat_window import ChatWindow
+from companion_bubble import (
+    CompanionBubble,
+    QuickAskPopup,
+    apply_context_menu_style,
+)
+from companion_service import CompanionController, CompanionReply
 from config import AppConfig
 from memory.memory_service import MemoryService
 from memory_window import MemoryManagerWindow
@@ -50,6 +56,7 @@ from models.reminder import Reminder
 from models.task import Task, TaskDataError
 from pet_motion import PetMotionEngine, WanderController
 from pet_state import PetStateStore, PetWindowState
+from pet_status_pill import PetStatusPill, compute_todo_status_snapshot
 from profile_window import ProfileWindow
 from reminder_bubble import ReminderBubble
 from reminder_manager import ReminderManager
@@ -58,6 +65,7 @@ from todo_window import TodoWindow
 from ui_resources import load_application_icon
 from video_yield import FullscreenYieldWatcher
 from voice.settings_store import VoiceSettingsStore
+from window_observer import ForegroundWindowInfo, ForegroundWindowObserver
 
 
 class PetWindow(QLabel):
@@ -80,6 +88,8 @@ class PetWindow(QLabel):
         state_store: PetStateStore | None = None,
         character_packs: tuple[CharacterPack, ...] | None = None,
         enable_fullscreen_watcher: bool | None = None,
+        companion_controller: CompanionController | None = None,
+        enable_window_observer: bool | None = None,
     ) -> None:
         super().__init__(parent)
         self._config = config
@@ -106,7 +116,11 @@ class PetWindow(QLabel):
         self._tray_topmost_action: QAction | None = None
         self._tray_wander_action: QAction | None = None
         self._tray_yield_action: QAction | None = None
+        self._tray_pill_action: QAction | None = None
+        self._tray_bubble_action: QAction | None = None
+        self._tray_aware_action: QAction | None = None
         self._reminder_bubbles: dict[str, ReminderBubble] = {}
+        self._transient_activity: str = ""
         self._press_global: QPoint | None = None
         self._press_time: float = 0.0
         self._last_drag_global: QPoint | None = None
@@ -116,6 +130,37 @@ class PetWindow(QLabel):
         self._screen_signal_connected = False
         self._current_pixmap: QPixmap = QPixmap()
         self._missing_asset_text: str = ""
+
+        # Phase 14 overlays & companion engine
+        self._status_pill = PetStatusPill()
+        self._status_pill.quick_ask_requested.connect(self.open_quick_ask)
+        self._status_pill.todo_requested.connect(self._open_todo_window)
+        self._status_pill.chat_requested.connect(self._open_chat_window)
+
+        self._companion_bubble = CompanionBubble()
+        self._companion_bubble.open_chat_requested.connect(self._open_chat_window)
+
+        self._quick_ask_popup = QuickAskPopup()
+        self._quick_ask_popup.question_submitted.connect(self._on_quick_ask_submitted)
+
+        self._companion_controller = companion_controller or CompanionController(
+            profile_service=self._profile_service,
+            ai_settings_service=self._ai_settings_service,
+            parent=self,
+        )
+        self._companion_controller.set_enabled(
+            self._window_state.companion_bubble_enabled
+        )
+        self._companion_controller.reply_ready.connect(self._on_companion_reply)
+        self._companion_controller.activity_changed.connect(
+            self._on_companion_activity_changed
+        )
+        self.pet_poked.connect(self._companion_controller.handle_poke)
+
+        self._pill_refresh_timer = QTimer(self)
+        self._pill_refresh_timer.setInterval(30_000)
+        self._pill_refresh_timer.timeout.connect(self._refresh_status_pill)
+        self._todo_manager.subscribe(self._refresh_status_pill)
 
         # Character packs
         self._character_packs: tuple[CharacterPack, ...] = (
@@ -185,6 +230,25 @@ class PetWindow(QLabel):
         if use_watcher:
             self._fullscreen_watcher.start()
 
+        # Respectful foreground window awareness (active in live runs or when requested)
+        use_observer = (
+            enable_window_observer
+            if enable_window_observer is not None
+            else (state_store is not None and sys.platform == "win32")
+        )
+        self._window_observer = ForegroundWindowObserver(parent=self)
+        self._window_observer.set_enabled(
+            self._window_state.window_awareness_enabled
+            and self._window_state.companion_bubble_enabled
+        )
+        self._window_observer.context_noticed.connect(
+            self._on_foreground_context_noticed
+        )
+        if use_observer:
+            self._window_observer.start()
+
+        self._refresh_status_pill()
+        self._pill_refresh_timer.start()
         self._motion_timer.start()
 
     def _safe_hwnd(self) -> int | None:
@@ -224,6 +288,7 @@ class PetWindow(QLabel):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
 
     def _setup_window(self) -> None:
+        self.setObjectName("petWindow")
         flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
         if self._effective_topmost():
             flags |= Qt.WindowType.WindowStaysOnTopHint
@@ -232,7 +297,8 @@ class PetWindow(QLabel):
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
         self.setAutoFillBackground(False)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setStyleSheet("background: transparent;")
+        # Scope transparent rule strictly to the pet QLabel so child QMenus never turn black on Win11.
+        self.setStyleSheet("QLabel#petWindow { background: transparent; }")
         self.setCursor(Qt.CursorShape.OpenHandCursor)
         self.setToolTip("轻点戳一戳，按住左键拖动，双击打开待办，右键打开功能菜单")
 
@@ -245,6 +311,10 @@ class PetWindow(QLabel):
 
     def _apply_effective_topmost(self) -> None:
         target = self._effective_topmost()
+        self._status_pill.set_topmost(target)
+        self._companion_bubble.set_topmost(target)
+        if hasattr(self, "_window_observer"):
+            self._update_observer_suppression()
         current = bool(self.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
         if target == current:
             return
@@ -256,6 +326,7 @@ class PetWindow(QLabel):
             self.move(position)
             if target:
                 self.raise_()
+            self._reposition_overlays()
 
     def _on_fullscreen_changed(self, is_fullscreen: bool) -> None:
         self._fullscreen_yielded = bool(
@@ -274,6 +345,24 @@ class PetWindow(QLabel):
         topmost_action.setChecked(self._window_state.always_on_top)
         topmost_action.triggered.connect(self.set_always_on_top)
         menu.addAction(topmost_action)
+
+        pill_action = QAction("显示灵动胶囊", menu)
+        pill_action.setCheckable(True)
+        pill_action.setChecked(self._window_state.status_pill_enabled)
+        pill_action.triggered.connect(self.set_status_pill_enabled)
+        menu.addAction(pill_action)
+
+        bubble_action = QAction("主动陪聊气泡", menu)
+        bubble_action.setCheckable(True)
+        bubble_action.setChecked(self._window_state.companion_bubble_enabled)
+        bubble_action.triggered.connect(self.set_companion_bubble_enabled)
+        menu.addAction(bubble_action)
+
+        aware_action = QAction("前台窗口感知", menu)
+        aware_action.setCheckable(True)
+        aware_action.setChecked(self._window_state.window_awareness_enabled)
+        aware_action.triggered.connect(self.set_window_awareness_enabled)
+        menu.addAction(aware_action)
 
         wander_action = QAction("自主漫步", menu)
         wander_action.setCheckable(True)
@@ -294,6 +383,9 @@ class PetWindow(QLabel):
         chat_action = QAction("AI聊天", menu)
         chat_action.triggered.connect(lambda _checked=False: self._open_chat_window())
         menu.addAction(chat_action)
+        ask_action = QAction("问她一句", menu)
+        ask_action.triggered.connect(lambda _checked=False: self.open_quick_ask())
+        menu.addAction(ask_action)
         profile_action = QAction("桌宠设置", menu)
         profile_action.triggered.connect(
             lambda _checked=False: self._open_profile_window()
@@ -316,9 +408,13 @@ class PetWindow(QLabel):
         exit_action.triggered.connect(QApplication.instance().quit)
         menu.addAction(exit_action)
 
+        apply_context_menu_style(menu)
         self._tray_menu = menu
         self._tray_toggle_action = toggle_action
         self._tray_topmost_action = topmost_action
+        self._tray_pill_action = pill_action
+        self._tray_bubble_action = bubble_action
+        self._tray_aware_action = aware_action
         self._tray_wander_action = wander_action
         self._tray_yield_action = yield_action
 
@@ -346,6 +442,7 @@ class PetWindow(QLabel):
         open_dir = QAction("打开角色包目录…", menu)
         open_dir.triggered.connect(self._open_characters_folder)
         menu.addAction(open_dir)
+        apply_context_menu_style(menu)
 
     def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason in (
@@ -365,6 +462,16 @@ class PetWindow(QLabel):
             )
         if self._tray_topmost_action is not None:
             self._tray_topmost_action.setChecked(self._window_state.always_on_top)
+        if self._tray_pill_action is not None:
+            self._tray_pill_action.setChecked(self._window_state.status_pill_enabled)
+        if self._tray_bubble_action is not None:
+            self._tray_bubble_action.setChecked(
+                self._window_state.companion_bubble_enabled
+            )
+        if self._tray_aware_action is not None:
+            self._tray_aware_action.setChecked(
+                self._window_state.window_awareness_enabled
+            )
         if self._tray_wander_action is not None:
             self._tray_wander_action.setChecked(self._window_state.wandering_enabled)
         if self._tray_yield_action is not None:
@@ -375,6 +482,120 @@ class PetWindow(QLabel):
     def _save_window_state(self) -> None:
         if self._state_store is not None:
             self._state_store.save(self._window_state)
+
+    def _screen_available_area(self) -> QRect | None:
+        screen = (
+            QApplication.screenAt(self.geometry().center())
+            or QApplication.primaryScreen()
+        )
+        return screen.availableGeometry() if screen is not None else None
+
+    def _reposition_overlays(self) -> None:
+        pet_rect = self.geometry()
+        area = self._screen_available_area()
+        self._status_pill.reposition_above(pet_rect, area)
+        if self._companion_bubble.isVisible():
+            self._companion_bubble.position_near(pet_rect, area)
+
+    def _sync_status_pill_visibility(self) -> None:
+        if self.isVisible() and self._window_state.status_pill_enabled:
+            self._reposition_overlays()
+            if not self._status_pill.isVisible():
+                self._status_pill.show()
+                self._status_pill.raise_()
+        else:
+            self._status_pill.hide()
+
+    def _refresh_status_pill(self) -> None:
+        pet_name = self._profile_service.profile.pet_name.strip() or "克劳德娘"
+        snapshot = compute_todo_status_snapshot(
+            self._todo_manager.get_tasks(),
+            active_reminder_count=len(self._reminder_bubbles),
+            activity_label=self._transient_activity or None,
+            pet_name=pet_name,
+        )
+        self._status_pill.set_snapshot(snapshot)
+        if self.isVisible() and self._window_state.status_pill_enabled:
+            self._reposition_overlays()
+
+    def _update_observer_suppression(self) -> None:
+        suppressed = (
+            not self.isVisible()
+            or self._fullscreen_yielded
+            or bool(self._reminder_bubbles)
+        )
+        self._window_observer.set_suppressed(suppressed)
+
+    def set_status_pill_enabled(self, enabled: bool) -> None:
+        target = bool(enabled)
+        self._window_state = replace(self._window_state, status_pill_enabled=target)
+        self._sync_status_pill_visibility()
+        self._save_window_state()
+        self._sync_tray_state()
+
+    def set_companion_bubble_enabled(self, enabled: bool) -> None:
+        target = bool(enabled)
+        self._window_state = replace(
+            self._window_state, companion_bubble_enabled=target
+        )
+        self._companion_controller.set_enabled(target)
+        self._window_observer.set_enabled(
+            target and self._window_state.window_awareness_enabled
+        )
+        if not target:
+            self._companion_bubble.dismiss()
+        self._save_window_state()
+        self._sync_tray_state()
+
+    def set_window_awareness_enabled(self, enabled: bool) -> None:
+        target = bool(enabled)
+        self._window_state = replace(
+            self._window_state, window_awareness_enabled=target
+        )
+        self._window_observer.set_enabled(
+            target and self._window_state.companion_bubble_enabled
+        )
+        self._save_window_state()
+        self._sync_tray_state()
+
+    def open_quick_ask(self) -> None:
+        """Open the lightweight floating 1-line prompt box anchored near the pet/pill."""
+        if not self.isVisible():
+            self.show_from_tray()
+        anchor = (
+            self._status_pill.geometry()
+            if self._status_pill.isVisible()
+            else self.geometry()
+        )
+        self._quick_ask_popup.open_near(anchor, self._screen_available_area())
+
+    def _on_quick_ask_submitted(self, question: str) -> None:
+        self._companion_controller.ask_quick(question)
+
+    def _on_foreground_context_noticed(self, info: ForegroundWindowInfo) -> None:
+        if not self._window_state.companion_bubble_enabled or self._reminder_bubbles:
+            return
+        self._companion_controller.handle_foreground_context(info)
+
+    def _on_companion_activity_changed(self, label: str) -> None:
+        self._transient_activity = label.strip()
+        self._refresh_status_pill()
+
+    def _on_companion_reply(self, reply: CompanionReply) -> None:
+        if not self.isVisible() or self._reminder_bubbles:
+            return
+        if reply.kind != "quick_ask" and not self._window_state.companion_bubble_enabled:
+            return
+        duration = 8000 if reply.kind == "quick_ask" else 6200
+        self._companion_bubble.show_message(
+            reply.text,
+            speaker=reply.speaker,
+            duration_ms=duration,
+            show_chat_button=True,
+        )
+        self._companion_bubble.position_near(
+            self.geometry(), self._screen_available_area()
+        )
 
     def set_always_on_top(self, enabled: bool) -> None:
         target = bool(enabled)
@@ -409,13 +630,19 @@ class PetWindow(QLabel):
         self._wander.cancel()
         self._motion.set_walking(False, time.perf_counter())
         self._state_controller.set_walking(False)
+        self._status_pill.hide()
+        self._companion_bubble.dismiss()
+        self._quick_ask_popup.hide()
         self.hide()
+        self._update_observer_suppression()
         self._sync_tray_state()
 
     def show_from_tray(self) -> None:
         self.show()
         self.raise_()
         self.activateWindow()
+        self._sync_status_pill_visibility()
+        self._update_observer_suppression()
         self._sync_tray_state()
 
     def toggle_pet_visibility(self) -> None:
@@ -464,10 +691,12 @@ class PetWindow(QLabel):
                     self._state_controller.set_walking(True)
                     if step.x != self.x():
                         self.move(step.x, self.y())
+                        self._reposition_overlays()
                 else:
                     self._state_controller.set_walking(False)
                     if step.arrived and step.x != self.x():
                         self.move(step.x, self.y())
+                        self._reposition_overlays()
                     if step.trigger_variant and self._animation_manager.character_pack.clips_for("variant"):
                         self._state_controller.trigger_oneshot("variant")
 
@@ -494,8 +723,10 @@ class PetWindow(QLabel):
         self._missing_asset_text = ""
         self._current_pixmap = pixmap
         logical_size = pixmap.deviceIndependentSize().toSize()
-        if not logical_size.isEmpty():
+        if not logical_size.isEmpty() and logical_size != self.size():
             self.setFixedSize(logical_size)
+            if self.isVisible():
+                self._reposition_overlays()
         self.update()
 
     def _show_missing_asset_message(self) -> None:
@@ -503,8 +734,8 @@ class PetWindow(QLabel):
         self._missing_asset_text = "桌宠 idle 素材缺失"
         self.setText(self._missing_asset_text)
         self.setStyleSheet(
-            "background: rgba(40, 40, 40, 190); color: white; "
-            "padding: 12px; border-radius: 8px;"
+            "QLabel#petWindow { background: rgba(40, 40, 40, 190); color: white; "
+            "padding: 12px; border-radius: 8px; }"
         )
         self.adjustSize()
 
@@ -575,11 +806,15 @@ class PetWindow(QLabel):
             handle.screenChanged.connect(self._on_screen_changed)
             self._screen_signal_connected = True
             self._on_screen_changed(handle.screen())
+        self._refresh_status_pill()
+        self._sync_status_pill_visibility()
+        self._update_observer_suppression()
         self._sync_tray_state()
 
     def _on_screen_changed(self, screen: QScreen | None) -> None:
         if screen is not None:
             self._animation_manager.set_device_pixel_ratio(screen.devicePixelRatio())
+        self._reposition_overlays()
         for bubble in self._reminder_bubbles.values():
             self._position_bubble(bubble)
 
@@ -628,6 +863,7 @@ class PetWindow(QLabel):
         self._last_drag_time = now
 
         self.move(current_global - self._drag_offset)
+        self._reposition_overlays()
         for bubble in self._reminder_bubbles.values():
             self._position_bubble(bubble)
         self.update()
@@ -756,11 +992,13 @@ class PetWindow(QLabel):
         bubble.snooze_requested.connect(self._snooze_reminder)
         bubble.dismissed.connect(self._reminder_bubble_finished)
         self._reminder_bubbles[reminder.id] = bubble
+        self._companion_bubble.dismiss()
         self._wander.cancel()
         self._state_controller.set_walking(False)
         self._state_controller.set_reminding(True)
         # Unread reminder temporarily takes priority over fullscreen yield.
         self._apply_effective_topmost()
+        self._refresh_status_pill()
         bubble.adjustSize()
         self._position_bubble(bubble)
         bubble.show()
@@ -827,6 +1065,7 @@ class PetWindow(QLabel):
         self._reminder_manager.reminder_finished(reminder_id)
         self._state_controller.set_reminding(bool(self._reminder_bubbles))
         self._apply_effective_topmost()
+        self._refresh_status_pill()
         if bubble is not None:
             bubble.deleteLater()
 
@@ -876,11 +1115,33 @@ class PetWindow(QLabel):
             lambda _checked=False: self._open_memory_window()
         )
         menu.addAction(memory_action)
+        ask_action = QAction("问她一句", menu)
+        ask_action.triggered.connect(lambda _checked=False: self.open_quick_ask())
+        menu.addAction(ask_action)
         menu.addSeparator()
 
         appearance_menu = menu.addMenu("外观与行为")
         chars_menu = appearance_menu.addMenu("角色形象")
         self._populate_character_menu(chars_menu)
+        appearance_menu.addSeparator()
+
+        pill_action = QAction("显示灵动胶囊", appearance_menu)
+        pill_action.setCheckable(True)
+        pill_action.setChecked(self._window_state.status_pill_enabled)
+        pill_action.triggered.connect(self.set_status_pill_enabled)
+        appearance_menu.addAction(pill_action)
+
+        bubble_action = QAction("主动陪聊气泡", appearance_menu)
+        bubble_action.setCheckable(True)
+        bubble_action.setChecked(self._window_state.companion_bubble_enabled)
+        bubble_action.triggered.connect(self.set_companion_bubble_enabled)
+        appearance_menu.addAction(bubble_action)
+
+        aware_action = QAction("前台窗口感知", appearance_menu)
+        aware_action.setCheckable(True)
+        aware_action.setChecked(self._window_state.window_awareness_enabled)
+        aware_action.triggered.connect(self.set_window_awareness_enabled)
+        appearance_menu.addAction(aware_action)
         appearance_menu.addSeparator()
 
         wander_action = QAction("自主漫步", appearance_menu)
@@ -909,6 +1170,7 @@ class PetWindow(QLabel):
         exit_action = QAction("退出", menu)
         exit_action.triggered.connect(QApplication.instance().quit)
         menu.addAction(exit_action)
+        apply_context_menu_style(menu)
         return menu
 
     def set_waiting(self, active: bool) -> None:
@@ -934,6 +1196,38 @@ class PetWindow(QLabel):
     @property
     def fullscreen_yielded(self) -> bool:
         return self._fullscreen_yielded
+
+    @property
+    def status_pill_enabled(self) -> bool:
+        return self._window_state.status_pill_enabled
+
+    @property
+    def companion_bubble_enabled(self) -> bool:
+        return self._window_state.companion_bubble_enabled
+
+    @property
+    def window_awareness_enabled(self) -> bool:
+        return self._window_state.window_awareness_enabled
+
+    @property
+    def status_pill(self) -> PetStatusPill:
+        return self._status_pill
+
+    @property
+    def companion_bubble(self) -> CompanionBubble:
+        return self._companion_bubble
+
+    @property
+    def quick_ask_popup(self) -> QuickAskPopup:
+        return self._quick_ask_popup
+
+    @property
+    def companion_controller(self) -> CompanionController:
+        return self._companion_controller
+
+    @property
+    def window_observer(self) -> ForegroundWindowObserver:
+        return self._window_observer
 
     @property
     def motion_engine(self) -> PetMotionEngine:
@@ -999,10 +1293,18 @@ class PetWindow(QLabel):
     def closeEvent(self, event: QCloseEvent) -> None:
         self._motion_timer.stop()
         self._poke_clear_timer.stop()
+        self._pill_refresh_timer.stop()
         self._fullscreen_watcher.stop()
+        self._window_observer.stop()
+        self._companion_controller.shutdown()
+        self._todo_manager.unsubscribe(self._refresh_status_pill)
         self._animation_manager.stop()
         self._reminder_manager.stop()
         self._reminder_manager.clear_queue()
+        self._status_pill.close()
+        self._companion_bubble.dismiss()
+        self._companion_bubble.close()
+        self._quick_ask_popup.close()
         if self._tray_icon is not None:
             self._tray_icon.hide()
         if self._todo_window is not None:

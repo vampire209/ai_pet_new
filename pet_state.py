@@ -17,7 +17,7 @@ def default_pet_state_path() -> Path:
 
 @dataclass(frozen=True, slots=True)
 class PetWindowState:
-    """Validated window position, topmost, wandering, fullscreen yield, and character pack."""
+    """Validated window position, topmost, wandering, fullscreen yield, character pack, and Phase 14 prefs."""
 
     x: int | None = None
     y: int | None = None
@@ -25,6 +25,9 @@ class PetWindowState:
     wandering_enabled: bool = True
     fullscreen_yield_enabled: bool = True
     character_pack: str = "default"
+    status_pill_enabled: bool = True
+    companion_bubble_enabled: bool = True
+    window_awareness_enabled: bool = True
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "PetWindowState":
@@ -46,6 +49,12 @@ class PetWindowState:
             if isinstance(raw_pack, str) and raw_pack.strip()
             else "default"
         )
+        raw_pill = raw.get("status_pill_enabled", True)
+        status_pill_enabled = raw_pill if isinstance(raw_pill, bool) else True
+        raw_bubble = raw.get("companion_bubble_enabled", True)
+        companion_bubble_enabled = raw_bubble if isinstance(raw_bubble, bool) else True
+        raw_aware = raw.get("window_awareness_enabled", True)
+        window_awareness_enabled = raw_aware if isinstance(raw_aware, bool) else True
         return cls(
             x=x,
             y=y,
@@ -53,17 +62,23 @@ class PetWindowState:
             wandering_enabled=wandering_enabled,
             fullscreen_yield_enabled=fullscreen_yield_enabled,
             character_pack=character_pack,
+            status_pill_enabled=status_pill_enabled,
+            companion_bubble_enabled=companion_bubble_enabled,
+            window_awareness_enabled=window_awareness_enabled,
         )
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "version": 2,
+            "version": 3,
             "x": self.x,
             "y": self.y,
             "always_on_top": self.always_on_top,
             "wandering_enabled": self.wandering_enabled,
             "fullscreen_yield_enabled": self.fullscreen_yield_enabled,
             "character_pack": self.character_pack,
+            "status_pill_enabled": self.status_pill_enabled,
+            "companion_bubble_enabled": self.companion_bubble_enabled,
+            "window_awareness_enabled": self.window_awareness_enabled,
         }
 
 
