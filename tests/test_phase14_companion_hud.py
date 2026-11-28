@@ -131,13 +131,13 @@ class Phase14CompanionHudTests(unittest.TestCase):
                 pill.testAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
             )
             hits: list[str] = []
+            pill.gemini_requested.connect(lambda: hits.append("gemini"))
+            pill.panel_requested.connect(lambda: hits.append("panel"))
             pill.quick_ask_requested.connect(lambda: hits.append("ask"))
-            pill.todo_requested.connect(lambda: hits.append("todo"))
-            pill.chat_requested.connect(lambda: hits.append("chat"))
 
             for rect in (pill._left_rect, pill._center_rect, pill._right_rect):
                 center = QPointF(rect.center())
-                ev = QMouseEvent(
+                press_ev = QMouseEvent(
                     QMouseEvent.Type.MouseButtonPress,
                     center,
                     center,
@@ -145,8 +145,17 @@ class Phase14CompanionHudTests(unittest.TestCase):
                     Qt.MouseButton.LeftButton,
                     Qt.KeyboardModifier.NoModifier,
                 )
-                pill.mousePressEvent(ev)
-            self.assertEqual(hits, ["ask", "todo", "chat"])
+                release_ev = QMouseEvent(
+                    QMouseEvent.Type.MouseButtonRelease,
+                    center,
+                    center,
+                    Qt.MouseButton.LeftButton,
+                    Qt.MouseButton.NoButton,
+                    Qt.KeyboardModifier.NoModifier,
+                )
+                pill.mousePressEvent(press_ev)
+                pill.mouseReleaseEvent(release_ev)
+            self.assertEqual(hits, ["gemini", "panel", "ask"])
         finally:
             pill.close()
 
@@ -317,6 +326,160 @@ class Phase14CompanionHudTests(unittest.TestCase):
                 self.app.processEvents()
                 self.assertFalse(pet.status_pill.isVisible())
                 self.assertFalse(store.load().status_pill_enabled)
+            finally:
+                pet.close()
+
+    def test_09_gemini_shortcut_and_custom_url_from_panel(self) -> None:
+        opened: list[str] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            store = PetStateStore(Path(tmp) / "pet_state.json")
+            manager = TodoManager(Path(tmp) / "tasks.json")
+            pet = PetWindow(
+                self.config,
+                manager,
+                ReminderManager(manager),
+                state_store=store,
+                enable_fullscreen_watcher=False,
+                enable_window_observer=False,
+                url_opener=lambda url: opened.append(url) or True,
+            )
+            try:
+                pet.show()
+                pet.status_pill.gemini_requested.emit()
+                self.assertEqual(opened, ["https://gemini.google.com/"])
+
+                pet.open_control_panel("settings")
+                pet.control_panel.select_settings_tab("gemini")
+                pet.control_panel._gemini_url_edit.setText("https://aistudio.google.com/")
+                pet.control_panel._apply_settings_clicked()
+                self.app.processEvents()
+                self.assertEqual(pet.gemini_url, "https://aistudio.google.com/")
+                self.assertEqual(store.load().gemini_url, "https://aistudio.google.com/")
+
+                pet.control_panel._gemini_btn.click()
+                self.assertEqual(opened[-1], "https://aistudio.google.com/")
+            finally:
+                pet.close()
+
+    def test_10_quick_ask_and_control_panel_follow_pet_and_detach_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = PetStateStore(Path(tmp) / "pet_state.json")
+            manager = TodoManager(Path(tmp) / "tasks.json")
+            pet = PetWindow(
+                self.config,
+                manager,
+                ReminderManager(manager),
+                state_store=store,
+                enable_fullscreen_watcher=False,
+                enable_window_observer=False,
+            )
+            try:
+                pet.show()
+                pet.move(320, 420)
+                pet._reposition_overlays()
+                pet.open_quick_ask()
+                pet.open_control_panel("chat")
+                self.app.processEvents()
+
+                ask_before = pet.quick_ask_popup.pos()
+                panel_before = pet.control_panel.pos()
+
+                # Attached mode: moving pet moves quick-ask & control panel together
+                pet.move(460, 420)
+                pet._reposition_overlays()
+                self.app.processEvents()
+                self.assertNotEqual(pet.quick_ask_popup.pos().x(), ask_before.x())
+                self.assertNotEqual(pet.control_panel.pos().x(), panel_before.x())
+
+                # Detached mode: moving pet keeps detached pill & panel fixed
+                pet.set_panel_detached(True)
+                self.app.processEvents()
+                pill_detached_pos = pet.status_pill.pos()
+                panel_detached_pos = pet.control_panel.pos()
+
+                pet.move(260, 420)
+                pet._reposition_overlays()
+                self.app.processEvents()
+                self.assertEqual(pet.status_pill.pos(), pill_detached_pos)
+                self.assertEqual(pet.control_panel.pos(), panel_detached_pos)
+            finally:
+                pet.close()
+
+    def test_11_claude_control_panel_todo_and_docked_chat(self) -> None:
+        fake = _FakeStreamClient("收到！我已经记在羊皮纸小本本上啦~")
+        controller = CompanionController(
+            client_factory=lambda: fake,  # type: ignore[return-value]
+            poke_window_ms=50,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = PetStateStore(Path(tmp) / "pet_state.json")
+            manager = TodoManager(Path(tmp) / "tasks.json")
+            task = manager.add_task("测试面板勾选待办")
+            pet = PetWindow(
+                self.config,
+                manager,
+                ReminderManager(manager),
+                state_store=store,
+                companion_controller=controller,
+                enable_fullscreen_watcher=False,
+                enable_window_observer=False,
+            )
+            try:
+                pet.show()
+                pet.open_control_panel("status")
+                self.app.processEvents()
+                self.assertTrue(pet.control_panel.isVisible())
+
+                # Complete task from panel signal
+                pet.control_panel.complete_task_requested.emit(task.id)
+                self.app.processEvents()
+                self.assertTrue(manager.get_task(task.id).completed)
+
+                # Docked quick chat inside Claude Control Panel
+                pet.control_panel.select_page("chat")
+                pet.control_panel._chat_input.setText("帮我打个气")
+                pet.control_panel._submit_panel_chat()
+                self.assertTrue(
+                    self._pump_until(lambda: len(controller.session) == 1, timeout_s=2.0)
+                )
+                self.assertEqual(len(fake.calls), 1)
+            finally:
+                pet.close()
+
+    def test_12_mouse_through_character_hide_and_tray_recover(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = PetStateStore(Path(tmp) / "pet_state.json")
+            manager = TodoManager(Path(tmp) / "tasks.json")
+            pet = PetWindow(
+                self.config,
+                manager,
+                ReminderManager(manager),
+                state_store=store,
+                enable_fullscreen_watcher=False,
+                enable_window_observer=False,
+            )
+            try:
+                pet.show()
+                self.app.processEvents()
+                pet.set_mouse_through(True)
+                self.assertTrue(pet.mouse_through)
+                self.assertTrue(
+                    bool(pet.windowFlags() & Qt.WindowType.WindowTransparentForInput)
+                )
+
+                pet.set_character_visible(False)
+                self.app.processEvents()
+                self.assertFalse(pet.isVisible())
+                self.assertTrue(pet.status_pill.isVisible())
+
+                # One-click tray recovery restores character and disables click-through
+                pet.recover_desktop_components()
+                self.app.processEvents()
+                self.assertTrue(pet.isVisible())
+                self.assertFalse(pet.mouse_through)
+                self.assertFalse(
+                    bool(pet.windowFlags() & Qt.WindowType.WindowTransparentForInput)
+                )
             finally:
                 pet.close()
 

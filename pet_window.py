@@ -36,13 +36,14 @@ from ai.deepseek_client import DeepSeekClient
 from ai.profile_service import ProfileService
 from animation_manager import AnimationManager
 from animation_state import AnimationStateController
-from app_paths import characters_dir
+from app_paths import characters_dir, user_data_dir
 from character_pack import (
     CharacterPack,
     DEFAULT_PACK_ID,
     discover_character_packs,
 )
 from chat_window import ChatWindow
+from claude_control_panel import ClaudeControlPanel
 from companion_bubble import (
     CompanionBubble,
     QuickAskPopup,
@@ -55,7 +56,7 @@ from memory_window import MemoryManagerWindow
 from models.reminder import Reminder
 from models.task import Task, TaskDataError
 from pet_motion import PetMotionEngine, WanderController
-from pet_state import PetStateStore, PetWindowState
+from pet_state import DEFAULT_GEMINI_URL, PetStateStore, PetWindowState
 from pet_status_pill import PetStatusPill, compute_todo_status_snapshot
 from profile_window import ProfileWindow
 from reminder_bubble import ReminderBubble
@@ -90,6 +91,7 @@ class PetWindow(QLabel):
         enable_fullscreen_watcher: bool | None = None,
         companion_controller: CompanionController | None = None,
         enable_window_observer: bool | None = None,
+        url_opener=None,
     ) -> None:
         super().__init__(parent)
         self._config = config
@@ -106,6 +108,8 @@ class PetWindow(QLabel):
         self._chat_history_store = chat_history_store
         self._voice_settings_store = voice_settings_store
         self._state_store = state_store
+        self._url_opener = url_opener
+        self._desktop_hidden = False
         self._window_state = (
             state_store.load() if state_store is not None else PetWindowState()
         )
@@ -119,6 +123,10 @@ class PetWindow(QLabel):
         self._tray_pill_action: QAction | None = None
         self._tray_bubble_action: QAction | None = None
         self._tray_aware_action: QAction | None = None
+        self._tray_detach_action: QAction | None = None
+        self._tray_char_action: QAction | None = None
+        self._tray_through_action: QAction | None = None
+        self._tray_lock_action: QAction | None = None
         self._reminder_bubbles: dict[str, ReminderBubble] = {}
         self._transient_activity: str = ""
         self._press_global: QPoint | None = None
@@ -131,11 +139,42 @@ class PetWindow(QLabel):
         self._current_pixmap: QPixmap = QPixmap()
         self._missing_asset_text: str = ""
 
-        # Phase 14 overlays & companion engine
+        # Phase 14/15 overlays, unified Claude Control Panel & companion engine
         self._status_pill = PetStatusPill()
+        self._status_pill.gemini_requested.connect(self.open_gemini)
+        self._status_pill.panel_requested.connect(
+            lambda: self.toggle_control_panel("status")
+        )
         self._status_pill.quick_ask_requested.connect(self.open_quick_ask)
-        self._status_pill.todo_requested.connect(self._open_todo_window)
-        self._status_pill.chat_requested.connect(self._open_chat_window)
+        self._status_pill.drag_moved.connect(self._on_pill_drag_moved)
+        self._status_pill.drag_finished.connect(self._on_pill_drag_finished)
+
+        self._control_panel = ClaudeControlPanel(
+            ai_settings_service=self._ai_settings_service,
+        )
+        self._control_panel.open_gemini_requested.connect(self.open_gemini)
+        self._control_panel.open_todo_requested.connect(self._open_todo_window)
+        self._control_panel.open_memory_requested.connect(self._open_memory_window)
+        self._control_panel.open_full_chat_requested.connect(self._open_chat_window)
+        self._control_panel.open_profile_requested.connect(self._open_profile_window)
+        self._control_panel.open_characters_dir_requested.connect(
+            self._open_characters_folder
+        )
+        self._control_panel.open_data_dir_requested.connect(self._open_user_data_folder)
+        self._control_panel.reset_position_requested.connect(self.reset_position)
+        self._control_panel.recover_requested.connect(self.recover_desktop_components)
+        self._control_panel.clear_companion_session_requested.connect(
+            self._clear_companion_session
+        )
+        self._control_panel.quick_chat_submitted.connect(self._on_quick_ask_submitted)
+        self._control_panel.complete_task_requested.connect(
+            self._complete_task_from_panel
+        )
+        self._control_panel.state_applied.connect(self.apply_panel_state)
+        self._control_panel.topmost_toggled.connect(self.set_always_on_top)
+        self._control_panel.detach_toggled.connect(self.set_panel_detached)
+        self._control_panel.drag_moved.connect(self._on_panel_drag_moved)
+        self._control_panel.drag_finished.connect(self._on_panel_drag_finished)
 
         self._companion_bubble = CompanionBubble()
         self._companion_bubble.open_chat_requested.connect(self._open_chat_window)
@@ -156,6 +195,9 @@ class PetWindow(QLabel):
             self._on_companion_activity_changed
         )
         self.pet_poked.connect(self._companion_controller.handle_poke)
+        self._profile_service.profile_changed.connect(
+            lambda _profile: self._refresh_status_pill()
+        )
 
         self._pill_refresh_timer = QTimer(self)
         self._pill_refresh_timer.setInterval(30_000)
@@ -287,11 +329,27 @@ class PetWindow(QLabel):
         target.mkdir(parents=True, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
 
+    def _open_user_data_folder(self) -> None:
+        target = user_data_dir()
+        target.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
+
+    def open_gemini(self, url: str | None = None) -> bool:
+        """Open Gemini web interface (replaces White Dragon's GPT/Codex shortcut)."""
+        target = (url or self._window_state.gemini_url or DEFAULT_GEMINI_URL).strip()
+        if not (target.startswith("https://") or target.startswith("http://")):
+            target = DEFAULT_GEMINI_URL
+        if self._url_opener is not None:
+            return bool(self._url_opener(target))
+        return bool(QDesktopServices.openUrl(QUrl(target)))
+
     def _setup_window(self) -> None:
         self.setObjectName("petWindow")
         flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
         if self._effective_topmost():
             flags |= Qt.WindowType.WindowStaysOnTopHint
+        if self._window_state.mouse_through:
+            flags |= Qt.WindowType.WindowTransparentForInput
         self.setWindowFlags(flags)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
@@ -312,7 +370,9 @@ class PetWindow(QLabel):
     def _apply_effective_topmost(self) -> None:
         target = self._effective_topmost()
         self._status_pill.set_topmost(target)
+        self._control_panel.set_topmost(target)
         self._companion_bubble.set_topmost(target)
+        self._quick_ask_popup.set_topmost(target)
         if hasattr(self, "_window_observer"):
             self._update_observer_suppression()
         current = bool(self.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
@@ -328,6 +388,19 @@ class PetWindow(QLabel):
                 self.raise_()
             self._reposition_overlays()
 
+    def _apply_mouse_through_flag(self) -> None:
+        enabled = self._window_state.mouse_through
+        self._status_pill.set_mouse_through(enabled and not self._window_state.panel_detached)
+        current = bool(self.windowFlags() & Qt.WindowType.WindowTransparentForInput)
+        if enabled == current:
+            return
+        was_visible = self.isVisible()
+        position = self.pos()
+        self.setWindowFlag(Qt.WindowType.WindowTransparentForInput, enabled)
+        if was_visible:
+            self.show()
+            self.move(position)
+
     def _on_fullscreen_changed(self, is_fullscreen: bool) -> None:
         self._fullscreen_yielded = bool(
             is_fullscreen and self._window_state.fullscreen_yield_enabled
@@ -336,15 +409,54 @@ class PetWindow(QLabel):
 
     def _setup_tray(self) -> None:
         menu = QMenu()
+        recover_action = QAction("找回组件并关闭穿透", menu)
+        recover_action.triggered.connect(self.recover_desktop_components)
+        menu.addAction(recover_action)
+
         toggle_action = QAction("隐藏桌宠", menu)
         toggle_action.triggered.connect(self.toggle_pet_visibility)
         menu.addAction(toggle_action)
+
+        panel_action = QAction("打开控制面板", menu)
+        panel_action.triggered.connect(
+            lambda _checked=False: self.open_control_panel("status")
+        )
+        menu.addAction(panel_action)
+
+        gemini_action = QAction("打开 Gemini", menu)
+        gemini_action.triggered.connect(lambda _checked=False: self.open_gemini())
+        menu.addAction(gemini_action)
+        menu.addSeparator()
 
         topmost_action = QAction("始终置顶", menu)
         topmost_action.setCheckable(True)
         topmost_action.setChecked(self._window_state.always_on_top)
         topmost_action.triggered.connect(self.set_always_on_top)
         menu.addAction(topmost_action)
+
+        detach_action = QAction("面板与人物分离", menu)
+        detach_action.setCheckable(True)
+        detach_action.setChecked(self._window_state.panel_detached)
+        detach_action.triggered.connect(self.set_panel_detached)
+        menu.addAction(detach_action)
+
+        char_action = QAction("显示人物", menu)
+        char_action.setCheckable(True)
+        char_action.setChecked(self._window_state.character_visible)
+        char_action.triggered.connect(self.set_character_visible)
+        menu.addAction(char_action)
+
+        through_action = QAction("鼠标穿透（从托盘恢复）", menu)
+        through_action.setCheckable(True)
+        through_action.setChecked(self._window_state.mouse_through)
+        through_action.triggered.connect(self.set_mouse_through)
+        menu.addAction(through_action)
+
+        lock_action = QAction("锁定人物位置", menu)
+        lock_action.setCheckable(True)
+        lock_action.setChecked(self._window_state.position_locked)
+        lock_action.triggered.connect(self.set_position_locked)
+        menu.addAction(lock_action)
 
         pill_action = QAction("显示灵动胶囊", menu)
         pill_action.setCheckable(True)
@@ -412,6 +524,10 @@ class PetWindow(QLabel):
         self._tray_menu = menu
         self._tray_toggle_action = toggle_action
         self._tray_topmost_action = topmost_action
+        self._tray_detach_action = detach_action
+        self._tray_char_action = char_action
+        self._tray_through_action = through_action
+        self._tray_lock_action = lock_action
         self._tray_pill_action = pill_action
         self._tray_bubble_action = bubble_action
         self._tray_aware_action = aware_action
@@ -458,10 +574,18 @@ class PetWindow(QLabel):
     def _sync_tray_state(self) -> None:
         if self._tray_toggle_action is not None:
             self._tray_toggle_action.setText(
-                "隐藏桌宠" if self.isVisible() else "显示桌宠"
+                "显示桌宠" if self._desktop_hidden else "隐藏桌宠"
             )
         if self._tray_topmost_action is not None:
             self._tray_topmost_action.setChecked(self._window_state.always_on_top)
+        if self._tray_detach_action is not None:
+            self._tray_detach_action.setChecked(self._window_state.panel_detached)
+        if self._tray_char_action is not None:
+            self._tray_char_action.setChecked(self._window_state.character_visible)
+        if self._tray_through_action is not None:
+            self._tray_through_action.setChecked(self._window_state.mouse_through)
+        if self._tray_lock_action is not None:
+            self._tray_lock_action.setChecked(self._window_state.position_locked)
         if self._tray_pill_action is not None:
             self._tray_pill_action.setChecked(self._window_state.status_pill_enabled)
         if self._tray_bubble_action is not None:
@@ -493,18 +617,68 @@ class PetWindow(QLabel):
     def _reposition_overlays(self) -> None:
         pet_rect = self.geometry()
         area = self._screen_available_area()
-        self._status_pill.reposition_above(pet_rect, area)
+        if self._window_state.panel_detached:
+            if (
+                self._window_state.panel_x is not None
+                and self._window_state.panel_y is not None
+            ):
+                px, py = self._window_state.panel_x, self._window_state.panel_y
+                if area is not None:
+                    px = max(area.left() + 4, min(px, area.right() - self._status_pill.width() - 4))
+                    py = max(area.top() + 4, min(py, area.bottom() - self._status_pill.height() - 4))
+                self._status_pill.move(px, py)
+            else:
+                self._status_pill.reposition_above(pet_rect, area)
+            if self._control_panel.isVisible():
+                self._control_panel.position_near(self._status_pill.geometry(), area)
+        else:
+            self._status_pill.reposition_above(pet_rect, area)
+            if self._control_panel.isVisible():
+                self._control_panel.position_near(pet_rect, area)
+
+        # Quick-ask box and companion bubble ALWAYS move smoothly with Claude-chan!
+        if self._quick_ask_popup.isVisible():
+            anchor = (
+                self._status_pill.geometry()
+                if self._status_pill.isVisible() and not self._window_state.panel_detached
+                else pet_rect
+            )
+            self._quick_ask_popup.position_near(anchor, area)
         if self._companion_bubble.isVisible():
             self._companion_bubble.position_near(pet_rect, area)
 
     def _sync_status_pill_visibility(self) -> None:
-        if self.isVisible() and self._window_state.status_pill_enabled:
+        should_show = (
+            not self._desktop_hidden
+            and self._window_state.status_pill_enabled
+            and (self.isVisible() or not self._window_state.character_visible)
+        )
+        if should_show:
             self._reposition_overlays()
             if not self._status_pill.isVisible():
                 self._status_pill.show()
                 self._status_pill.raise_()
         else:
             self._status_pill.hide()
+
+    def _memory_count(self) -> int | None:
+        if self._memory_service is None:
+            return None
+        try:
+            return len(self._memory_service.list_memories())
+        except Exception:
+            return None
+
+    def _sync_control_panel_data(self) -> None:
+        pet_name = self._profile_service.profile.pet_name.strip() or "克劳德娘"
+        self._control_panel.sync_from_pet(
+            state=self._window_state,
+            packs=self._character_packs,
+            tasks=self._todo_manager.get_tasks(),
+            pet_name=pet_name,
+            memory_count=self._memory_count(),
+            active_reminder_count=len(self._reminder_bubbles),
+        )
 
     def _refresh_status_pill(self) -> None:
         pet_name = self._profile_service.profile.pet_name.strip() or "克劳德娘"
@@ -515,19 +689,218 @@ class PetWindow(QLabel):
             pet_name=pet_name,
         )
         self._status_pill.set_snapshot(snapshot)
-        if self.isVisible() and self._window_state.status_pill_enabled:
+        if self._control_panel.isVisible():
+            self._sync_control_panel_data()
+        if (self.isVisible() or not self._window_state.character_visible) and self._window_state.status_pill_enabled:
             self._reposition_overlays()
 
     def _update_observer_suppression(self) -> None:
         suppressed = (
-            not self.isVisible()
+            self._desktop_hidden
+            or not self.isVisible()
             or self._fullscreen_yielded
             or bool(self._reminder_bubbles)
         )
         self._window_observer.set_suppressed(suppressed)
 
+    def open_control_panel(self, page: str = "status") -> None:
+        """Open the Claude-themed unified floating Control Panel on the requested tab."""
+        if self._desktop_hidden:
+            self.show_from_tray()
+        self.refresh_character_packs()
+        self._sync_control_panel_data()
+        self._control_panel.sync_chat_history(self._companion_controller.session.messages())
+        self._control_panel.select_page(page)
+        anchor = (
+            self._status_pill.geometry()
+            if self._window_state.panel_detached and self._status_pill.isVisible()
+            else self.geometry()
+        )
+        self._control_panel.position_near(anchor, self._screen_available_area())
+        self._control_panel.show()
+        self._control_panel.raise_()
+        self._control_panel.activateWindow()
+
+    def toggle_control_panel(self, page: str = "status") -> None:
+        if self._control_panel.isVisible():
+            self._control_panel.collapse_panel()
+        else:
+            self.open_control_panel(page)
+
+    def _on_pill_drag_moved(self, dx: int, dy: int) -> None:
+        if self._window_state.panel_detached:
+            self._status_pill.move(self._status_pill.x() + dx, self._status_pill.y() + dy)
+            if self._control_panel.isVisible():
+                self._control_panel.position_near(
+                    self._status_pill.geometry(), self._screen_available_area()
+                )
+        elif not self._window_state.position_locked:
+            self._wander.cancel()
+            self.move(self.x() + dx, self.y() + dy)
+            self._reposition_overlays()
+
+    def _on_pill_drag_finished(self) -> None:
+        if self._window_state.panel_detached:
+            self._window_state = replace(
+                self._window_state,
+                panel_x=self._status_pill.x(),
+                panel_y=self._status_pill.y(),
+            )
+            self._save_window_state()
+        elif not self._window_state.position_locked:
+            self._window_state = replace(
+                self._window_state,
+                x=self.x(),
+                y=self.y(),
+            )
+            self._save_window_state()
+
+    def _on_panel_drag_moved(self, dx: int, dy: int) -> None:
+        if self._window_state.panel_detached:
+            self._control_panel.move(
+                self._control_panel.x() + dx, self._control_panel.y() + dy
+            )
+            self._status_pill.move(
+                self._status_pill.x() + dx, self._status_pill.y() + dy
+            )
+        elif not self._window_state.position_locked:
+            self._wander.cancel()
+            self.move(self.x() + dx, self.y() + dy)
+            self._reposition_overlays()
+
+    def _on_panel_drag_finished(self) -> None:
+        self._on_pill_drag_finished()
+
+    def _complete_task_from_panel(self, task_id: str) -> None:
+        try:
+            self._todo_manager.complete_task(
+                task_id, now=self._reminder_manager.now()
+            )
+        except Exception:
+            return
+        if self._todo_window is not None:
+            self._todo_window.refresh_tasks()
+        self._refresh_status_pill()
+
+    def _clear_companion_session(self) -> None:
+        self._companion_controller.session.clear()
+
+    def apply_panel_state(self, new_state: PetWindowState) -> None:
+        """Apply all settings saved from ClaudeControlPanel atomically."""
+        old_pack = self._window_state.character_pack
+        old_detached = self._window_state.panel_detached
+        if new_state.panel_detached and not old_detached and new_state.panel_x is None:
+            new_state = replace(
+                new_state,
+                panel_x=self._status_pill.x(),
+                panel_y=self._status_pill.y(),
+            )
+        self._window_state = new_state
+
+        if new_state.character_pack != old_pack:
+            pack = self._find_pack(new_state.character_pack)
+            self._animation_manager.load_character_pack(pack)
+
+        self._wander.set_enabled(
+            new_state.wandering_enabled
+            and not new_state.position_locked
+            and (self._state_store is not None)
+        )
+        if not new_state.wandering_enabled or new_state.position_locked:
+            self._motion.set_walking(False, time.perf_counter())
+            self._state_controller.set_walking(False)
+
+        self._fullscreen_watcher.set_enabled(new_state.fullscreen_yield_enabled)
+        if not new_state.fullscreen_yield_enabled:
+            self._fullscreen_yielded = False
+
+        self._companion_controller.set_enabled(new_state.companion_bubble_enabled)
+        self._window_observer.set_enabled(
+            new_state.window_awareness_enabled and new_state.companion_bubble_enabled
+        )
+        if not new_state.companion_bubble_enabled:
+            self._companion_bubble.dismiss()
+
+        if not self._desktop_hidden:
+            self.setVisible(new_state.character_visible)
+        self._apply_effective_topmost()
+        self._apply_mouse_through_flag()
+        self._sync_status_pill_visibility()
+        self._reposition_overlays()
+        self._save_window_state()
+        self._sync_tray_state()
+        if self._control_panel.isVisible():
+            self._sync_control_panel_data()
+
+    def set_panel_detached(self, detached: bool) -> None:
+        target = bool(detached)
+        updated = replace(
+            self._window_state,
+            panel_detached=target,
+            panel_x=self._status_pill.x() if target else self._window_state.panel_x,
+            panel_y=self._status_pill.y() if target else self._window_state.panel_y,
+        )
+        self.apply_panel_state(updated)
+
+    def set_character_visible(self, visible: bool) -> None:
+        target = bool(visible)
+        pill_enabled = self._window_state.status_pill_enabled or (not target)
+        updated = replace(
+            self._window_state,
+            character_visible=target,
+            status_pill_enabled=pill_enabled,
+        )
+        self.apply_panel_state(updated)
+
+    def set_mouse_through(self, enabled: bool) -> None:
+        updated = replace(self._window_state, mouse_through=bool(enabled))
+        self.apply_panel_state(updated)
+
+    def set_position_locked(self, locked: bool) -> None:
+        updated = replace(self._window_state, position_locked=bool(locked))
+        self.apply_panel_state(updated)
+
+    def reset_position(self) -> None:
+        """Move Claude-chan back to the primary screen bottom-right corner."""
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            return
+        available = screen.availableGeometry()
+        x = max(available.x(), available.x() + available.width() - self.width() - self._config.margin_x)
+        y = max(available.y(), available.y() + available.height() - self.height() - self._config.margin_y)
+        self.move(x, y)
+        self._window_state = replace(
+            self._window_state,
+            x=x,
+            y=y,
+            panel_x=None,
+            panel_y=None,
+        )
+        self._reposition_overlays()
+        self._save_window_state()
+
+    def recover_desktop_components(self) -> None:
+        """One-click safety recovery from tray: restore character, disable click-through, bring on screen."""
+        self._desktop_hidden = False
+        updated = replace(
+            self._window_state,
+            character_visible=True,
+            mouse_through=False,
+            status_pill_enabled=True,
+        )
+        self.apply_panel_state(updated)
+        if not self._is_position_visible_on_any_screen(self.x(), self.y()):
+            self.reset_position()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self._sync_status_pill_visibility()
+        self._sync_tray_state()
+
     def set_status_pill_enabled(self, enabled: bool) -> None:
         target = bool(enabled)
+        if not target and not self._window_state.character_visible:
+            return
         self._window_state = replace(self._window_state, status_pill_enabled=target)
         self._sync_status_pill_visibility()
         self._save_window_state()
@@ -559,12 +932,12 @@ class PetWindow(QLabel):
         self._sync_tray_state()
 
     def open_quick_ask(self) -> None:
-        """Open the lightweight floating 1-line prompt box anchored near the pet/pill."""
-        if not self.isVisible():
+        """Open the Claude-themed floating 1-line prompt box anchored near the pet."""
+        if self._desktop_hidden:
             self.show_from_tray()
         anchor = (
             self._status_pill.geometry()
-            if self._status_pill.isVisible()
+            if self._status_pill.isVisible() and not self._window_state.panel_detached
             else self.geometry()
         )
         self._quick_ask_popup.open_near(anchor, self._screen_available_area())
@@ -582,7 +955,11 @@ class PetWindow(QLabel):
         self._refresh_status_pill()
 
     def _on_companion_reply(self, reply: CompanionReply) -> None:
-        if not self.isVisible() or self._reminder_bubbles:
+        if self._control_panel.isVisible():
+            self._control_panel.append_chat_message("assistant", reply.text)
+            if self._control_panel._pages.currentIndex() == 1:
+                return
+        if self._desktop_hidden or not self.isVisible() or self._reminder_bubbles:
             return
         if reply.kind != "quick_ask" and not self._window_state.companion_bubble_enabled:
             return
@@ -627,10 +1004,12 @@ class PetWindow(QLabel):
         self._sync_tray_state()
 
     def hide_to_tray(self) -> None:
+        self._desktop_hidden = True
         self._wander.cancel()
         self._motion.set_walking(False, time.perf_counter())
         self._state_controller.set_walking(False)
         self._status_pill.hide()
+        self._control_panel.hide()
         self._companion_bubble.dismiss()
         self._quick_ask_popup.hide()
         self.hide()
@@ -638,15 +1017,17 @@ class PetWindow(QLabel):
         self._sync_tray_state()
 
     def show_from_tray(self) -> None:
-        self.show()
-        self.raise_()
-        self.activateWindow()
+        self._desktop_hidden = False
+        if self._window_state.character_visible:
+            self.show()
+            self.raise_()
+            self.activateWindow()
         self._sync_status_pill_visibility()
         self._update_observer_suppression()
         self._sync_tray_state()
 
     def toggle_pet_visibility(self) -> None:
-        if self.isVisible():
+        if not self._desktop_hidden and (self.isVisible() or self._status_pill.isVisible()):
             self.hide_to_tray()
         else:
             self.show_from_tray()
@@ -674,7 +1055,10 @@ class PetWindow(QLabel):
             allowed = (
                 self.isVisible()
                 and not self._dragging
+                and not self._window_state.position_locked
                 and not self._reminder_bubbles
+                and not self._quick_ask_popup.isVisible()
+                and not (self._control_panel.isVisible() and not self._window_state.panel_detached)
                 and self._state_controller.current_state in ("idle", "wait", "walk")
             )
             step = self._wander.tick(
@@ -841,6 +1225,9 @@ class PetWindow(QLabel):
 
         now = time.perf_counter()
         current_global = event.globalPosition().toPoint()
+        if self._window_state.position_locked:
+            event.accept()
+            return
         if not self._dragging:
             distance = (current_global - self._press_global).manhattanLength()
             threshold = QApplication.styleHints().startDragDistance()
@@ -1121,9 +1508,32 @@ class PetWindow(QLabel):
         menu.addSeparator()
 
         appearance_menu = menu.addMenu("外观与行为")
+        open_panel_action = QAction("克劳德控制面板…", appearance_menu)
+        open_panel_action.triggered.connect(
+            lambda _checked=False: self.open_control_panel("status")
+        )
+        appearance_menu.addAction(open_panel_action)
+
+        open_gemini_action = QAction("打开 Gemini", appearance_menu)
+        open_gemini_action.triggered.connect(lambda _checked=False: self.open_gemini())
+        appearance_menu.addAction(open_gemini_action)
+        appearance_menu.addSeparator()
+
         chars_menu = appearance_menu.addMenu("角色形象")
         self._populate_character_menu(chars_menu)
         appearance_menu.addSeparator()
+
+        detach_action = QAction("面板与人物分离", appearance_menu)
+        detach_action.setCheckable(True)
+        detach_action.setChecked(self._window_state.panel_detached)
+        detach_action.triggered.connect(self.set_panel_detached)
+        appearance_menu.addAction(detach_action)
+
+        char_vis_action = QAction("显示人物", appearance_menu)
+        char_vis_action.setCheckable(True)
+        char_vis_action.setChecked(self._window_state.character_visible)
+        char_vis_action.triggered.connect(self.set_character_visible)
+        appearance_menu.addAction(char_vis_action)
 
         pill_action = QAction("显示灵动胶囊", appearance_menu)
         pill_action.setCheckable(True)
@@ -1150,11 +1560,28 @@ class PetWindow(QLabel):
         wander_action.triggered.connect(self.set_wandering_enabled)
         appearance_menu.addAction(wander_action)
 
+        lock_action = QAction("锁定人物位置", appearance_menu)
+        lock_action.setCheckable(True)
+        lock_action.setChecked(self._window_state.position_locked)
+        lock_action.triggered.connect(self.set_position_locked)
+        appearance_menu.addAction(lock_action)
+
+        through_action = QAction("鼠标穿透（从托盘恢复）", appearance_menu)
+        through_action.setCheckable(True)
+        through_action.setChecked(self._window_state.mouse_through)
+        through_action.triggered.connect(self.set_mouse_through)
+        appearance_menu.addAction(through_action)
+
         yield_action = QAction("全屏自动让位", appearance_menu)
         yield_action.setCheckable(True)
         yield_action.setChecked(self._window_state.fullscreen_yield_enabled)
         yield_action.triggered.connect(self.set_fullscreen_yield_enabled)
         appearance_menu.addAction(yield_action)
+        appearance_menu.addSeparator()
+
+        reset_pos_action = QAction("回到屏幕右下角", appearance_menu)
+        reset_pos_action.triggered.connect(self.reset_position)
+        appearance_menu.addAction(reset_pos_action)
 
         topmost_action = QAction("始终置顶", menu)
         topmost_action.setCheckable(True)
@@ -1212,6 +1639,26 @@ class PetWindow(QLabel):
     @property
     def status_pill(self) -> PetStatusPill:
         return self._status_pill
+
+    @property
+    def control_panel(self) -> ClaudeControlPanel:
+        return self._control_panel
+
+    @property
+    def panel_detached(self) -> bool:
+        return self._window_state.panel_detached
+
+    @property
+    def mouse_through(self) -> bool:
+        return self._window_state.mouse_through
+
+    @property
+    def position_locked(self) -> bool:
+        return self._window_state.position_locked
+
+    @property
+    def gemini_url(self) -> str:
+        return self._window_state.gemini_url
 
     @property
     def companion_bubble(self) -> CompanionBubble:
@@ -1302,6 +1749,7 @@ class PetWindow(QLabel):
         self._reminder_manager.stop()
         self._reminder_manager.clear_queue()
         self._status_pill.close()
+        self._control_panel.close()
         self._companion_bubble.dismiss()
         self._companion_bubble.close()
         self._quick_ask_popup.close()

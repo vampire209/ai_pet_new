@@ -15,9 +15,12 @@ def default_pet_state_path() -> Path:
     return pet_state_path()
 
 
+DEFAULT_GEMINI_URL = "https://gemini.google.com/"
+
+
 @dataclass(frozen=True, slots=True)
 class PetWindowState:
-    """Validated window position, topmost, wandering, fullscreen yield, character pack, and Phase 14 prefs."""
+    """Validated window position, topmost, wandering, fullscreen yield, character pack, and Phase 14/15 HUD prefs."""
 
     x: int | None = None
     y: int | None = None
@@ -28,6 +31,13 @@ class PetWindowState:
     status_pill_enabled: bool = True
     companion_bubble_enabled: bool = True
     window_awareness_enabled: bool = True
+    panel_detached: bool = False
+    panel_x: int | None = None
+    panel_y: int | None = None
+    character_visible: bool = True
+    mouse_through: bool = False
+    position_locked: bool = False
+    gemini_url: str = DEFAULT_GEMINI_URL
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "PetWindowState":
@@ -55,6 +65,30 @@ class PetWindowState:
         companion_bubble_enabled = raw_bubble if isinstance(raw_bubble, bool) else True
         raw_aware = raw.get("window_awareness_enabled", True)
         window_awareness_enabled = raw_aware if isinstance(raw_aware, bool) else True
+        raw_detached = raw.get("panel_detached", False)
+        panel_detached = raw_detached if isinstance(raw_detached, bool) else False
+        raw_px = raw.get("panel_x")
+        raw_py = raw.get("panel_y")
+        panel_x = raw_px if isinstance(raw_px, int) and not isinstance(raw_px, bool) else None
+        panel_y = raw_py if isinstance(raw_py, int) and not isinstance(raw_py, bool) else None
+        if panel_x is None or panel_y is None:
+            panel_x, panel_y = None, None
+        raw_char_vis = raw.get("character_visible", True)
+        character_visible = raw_char_vis if isinstance(raw_char_vis, bool) else True
+        raw_through = raw.get("mouse_through", False)
+        mouse_through = raw_through if isinstance(raw_through, bool) else False
+        raw_locked = raw.get("position_locked", False)
+        position_locked = raw_locked if isinstance(raw_locked, bool) else False
+        raw_gemini = raw.get("gemini_url", DEFAULT_GEMINI_URL)
+        gemini_url = (
+            raw_gemini.strip()
+            if isinstance(raw_gemini, str)
+            and (
+                raw_gemini.strip().startswith("https://")
+                or raw_gemini.strip().startswith("http://")
+            )
+            else DEFAULT_GEMINI_URL
+        )
         return cls(
             x=x,
             y=y,
@@ -65,11 +99,18 @@ class PetWindowState:
             status_pill_enabled=status_pill_enabled,
             companion_bubble_enabled=companion_bubble_enabled,
             window_awareness_enabled=window_awareness_enabled,
+            panel_detached=panel_detached,
+            panel_x=panel_x,
+            panel_y=panel_y,
+            character_visible=character_visible,
+            mouse_through=mouse_through,
+            position_locked=position_locked,
+            gemini_url=gemini_url,
         )
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "version": 3,
+            "version": 4,
             "x": self.x,
             "y": self.y,
             "always_on_top": self.always_on_top,
@@ -79,6 +120,13 @@ class PetWindowState:
             "status_pill_enabled": self.status_pill_enabled,
             "companion_bubble_enabled": self.companion_bubble_enabled,
             "window_awareness_enabled": self.window_awareness_enabled,
+            "panel_detached": self.panel_detached,
+            "panel_x": self.panel_x,
+            "panel_y": self.panel_y,
+            "character_visible": self.character_visible,
+            "mouse_through": self.mouse_through,
+            "position_locked": self.position_locked,
+            "gemini_url": self.gemini_url,
         }
 
 

@@ -16,34 +16,34 @@ from PySide6.QtWidgets import (
 )
 
 
-# Explicit dark-frosted menu theme that prevents Windows 11 translucent-parent black-on-black menus.
+# Explicit Claude-themed warm-espresso frosted menu style (prevents Win11 translucent black menus).
 CONTEXT_MENU_STYLESHEET = """
 QMenu {
-    background-color: #24212E;
-    color: #FAF5EF;
-    border: 1px solid rgba(255, 224, 200, 75);
-    border-radius: 10px;
+    background-color: #2E231F;
+    color: #FFF7EE;
+    border: 1px solid rgba(242, 198, 160, 110);
+    border-radius: 12px;
     padding: 6px 4px;
     font-family: "Microsoft YaHei UI";
     font-size: 13px;
 }
 QMenu::item {
     background-color: transparent;
-    color: #FAF5EF;
+    color: #FFF7EE;
     padding: 7px 26px 7px 14px;
     margin: 1px 4px;
-    border-radius: 6px;
+    border-radius: 7px;
 }
 QMenu::item:selected {
-    background-color: #E07A42;
+    background-color: #D96B2F;
     color: #FFFFFF;
 }
 QMenu::item:disabled {
-    color: #8C8499;
+    color: #9A877D;
 }
 QMenu::separator {
     height: 1px;
-    background: rgba(255, 228, 208, 45);
+    background: rgba(245, 214, 184, 55);
     margin: 5px 12px;
 }
 QMenu::indicator {
@@ -270,12 +270,13 @@ class CompanionBubble(QWidget):
 
 
 class QuickAskPopup(QWidget):
-    """Lightweight floating 1-line prompt box ("问她一句") anchored near the pet."""
+    """Claude-themed floating 1-line prompt box ("问她一句") that moves smoothly with the pet."""
 
     question_submitted = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._topmost = True
         self.setObjectName("quickAskPopup")
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
@@ -283,7 +284,7 @@ class QuickAskPopup(QWidget):
             | Qt.WindowType.WindowStaysOnTopHint
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setFixedWidth(286)
+        self.setFixedWidth(308)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -292,30 +293,30 @@ class QuickAskPopup(QWidget):
         panel.setObjectName("quickAskPanel")
         panel.setStyleSheet(
             "QFrame#quickAskPanel {"
-            "  background-color: rgba(36, 33, 46, 244);"
-            "  border: 1.5px solid rgba(224, 122, 66, 210);"
-            "  border-radius: 16px;"
+            "  background-color: rgba(255, 250, 243, 248);"
+            "  border: 1.5px solid rgba(217, 107, 47, 215);"
+            "  border-radius: 18px;"
             "}"
             "QLineEdit#quickAskInput {"
             "  background: transparent;"
-            "  color: #FAF5EF;"
+            "  color: #332520;"
             "  border: none;"
             "  font-family: 'Microsoft YaHei UI';"
             "  font-size: 13px;"
-            "  padding: 4px 6px;"
+            "  padding: 5px 8px;"
             "}"
             "QPushButton#quickAskSend {"
-            "  background-color: #E07A42;"
+            "  background-color: #D96B2F;"
             "  color: #FFFFFF;"
             "  border: none;"
-            "  border-radius: 10px;"
-            "  padding: 5px 12px;"
+            "  border-radius: 12px;"
+            "  padding: 5px 14px;"
             "  font-family: 'Microsoft YaHei UI';"
             "  font-size: 12px;"
             "  font-weight: 600;"
             "}"
             "QPushButton#quickAskSend:hover {"
-            "  background-color: #EE894F;"
+            "  background-color: #E87D42;"
             "}"
         )
         root.addWidget(panel)
@@ -326,7 +327,7 @@ class QuickAskPopup(QWidget):
 
         self._input = QLineEdit()
         self._input.setObjectName("quickAskInput")
-        self._input.setPlaceholderText("问她一句…（回车发送，Esc 取消）")
+        self._input.setPlaceholderText("问克劳德娘一句…（回车发送）")
         self._input.returnPressed.connect(self._submit)
         row.addWidget(self._input, 1)
 
@@ -339,7 +340,19 @@ class QuickAskPopup(QWidget):
     def input_edit(self) -> QLineEdit:
         return self._input
 
-    def open_near(self, anchor_rect: QRect, screen_area: QRect | None) -> None:
+    def set_topmost(self, topmost: bool) -> None:
+        target = bool(topmost)
+        if target == self._topmost:
+            return
+        self._topmost = target
+        was_visible = self.isVisible()
+        pos = self.pos()
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, target)
+        if was_visible:
+            self.show()
+            self.move(pos)
+
+    def position_near(self, anchor_rect: QRect, screen_area: QRect | None) -> None:
         self.adjustSize()
         x = anchor_rect.center().x() - self.width() // 2
         y = anchor_rect.top() - self.height() - 10
@@ -355,6 +368,9 @@ class QuickAskPopup(QWidget):
                 min(y, screen_area.bottom() - self.height() - 6),
             )
         self.move(x, y)
+
+    def open_near(self, anchor_rect: QRect, screen_area: QRect | None) -> None:
+        self.position_near(anchor_rect, screen_area)
         self._input.clear()
         self.show()
         self.raise_()
