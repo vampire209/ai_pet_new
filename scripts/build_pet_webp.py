@@ -354,6 +354,31 @@ def register_in_manifest(
     return manifest_path
 
 
+def apply_loop_mode(
+    frames: list[Image.Image],
+    *,
+    loop_mode: str = "none",
+    crossfade_frames: int = 8,
+) -> list[Image.Image]:
+    """Make single-first-frame clips loop smoothly without jump cuts."""
+    if len(frames) <= 2 or loop_mode == "none":
+        return frames
+    if loop_mode == "pingpong":
+        # Forward 0..N-1 then reverse N-2..1 so frame 0 connects seamlessly.
+        return list(frames) + [frame.copy() for frame in reversed(frames[1:-1])]
+    if loop_mode == "crossfade":
+        blend_n = max(1, min(int(crossfade_frames), len(frames) // 3))
+        body = list(frames[blend_n:-blend_n])
+        blended: list[Image.Image] = []
+        tail = frames[-blend_n:]
+        head = frames[:blend_n]
+        for idx in range(blend_n):
+            alpha = (idx + 1) / float(blend_n + 1)
+            blended.append(Image.blend(tail[idx], head[idx], alpha))
+        return body + blended
+    raise ValueError(f"不支持的循环模式：{loop_mode}")
+
+
 def convert_to_pet_webp(
     source: Path,
     output_path: Path,
@@ -366,6 +391,8 @@ def convert_to_pet_webp(
     feather: float = 28.0,
     quality: int = 86,
     lossless: bool = False,
+    loop_mode: str = "none",
+    crossfade_frames: int = 8,
 ) -> tuple[Path, int]:
     with tempfile.TemporaryDirectory() as tmp:
         raw_frames = load_source_frames(source, fps=fps, temp_dir=Path(tmp))
@@ -383,14 +410,19 @@ def convert_to_pet_webp(
         ]
     )
     aligned = align_frames_to_canvas(processed, canvas_size=canvas_size)
-    save_transparent_webp(
+    looped = apply_loop_mode(
         aligned,
+        loop_mode=loop_mode,
+        crossfade_frames=crossfade_frames,
+    )
+    save_transparent_webp(
+        looped,
         output_path,
         fps=fps,
         quality=quality,
         lossless=lossless,
     )
-    return output_path, len(aligned)
+    return output_path, len(looped)
 
 
 def main(argv: Iterable[str] | None = None) -> int:
@@ -409,6 +441,13 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--quality", type=int, default=86, help="WebP 质量 1–100，默认 86")
     parser.add_argument("--lossless", action="store_true", help="使用无损透明 WebP")
     parser.add_argument("--oneshot", action="store_true", help="标记为单次播放动作（不循环）")
+    parser.add_argument(
+        "--loop-mode",
+        choices=("none", "pingpong", "crossfade"),
+        default="none",
+        help="单首帧视频无缝循环处理：none（原样）、pingpong（往返无缝）、crossfade（首尾融合）",
+    )
+    parser.add_argument("--crossfade-frames", type=int, default=8, help="crossfade 模式融合帧数，默认 8")
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     if args.output is None and args.pack_dir is None:
@@ -427,6 +466,8 @@ def main(argv: Iterable[str] | None = None) -> int:
         feather=args.feather,
         quality=args.quality,
         lossless=args.lossless,
+        loop_mode=args.loop_mode,
+        crossfade_frames=args.crossfade_frames,
     )
     print(f"已生成透明 WebP：{saved}（{count} 帧 @ {args.fps:g} fps，{args.size}x{args.size}）")
 
