@@ -224,29 +224,150 @@ def align_frames_to_canvas(
     return aligned
 
 
-def extract_frames_from_video(video_path: Path, fps: float, work_dir: Path) -> list[Path]:
-    ffmpeg = shutil.which("ffmpeg")
+def _remove_detached_corner_watermarks(rgba: Image.Image) -> Image.Image:
+    """Keep the main character foreground and strip tiny detached corner watermark blobs."""
+    w, h = rgba.size
+    if w < 16 or h < 16:
+        return rgba
+    pixels = rgba.load()
+    visited = bytearray(w * h)
+    components: list[tuple[int, list[int]]] = []
+
+    for y in range(h):
+        row = y * w
+        for x in range(w):
+            idx = row + x
+            if visited[idx] or pixels[x, y][3] < 20:
+                continue
+            queue: deque[tuple[int, int]] = deque([(x, y)])
+            visited[idx] = 1
+            cells: list[int] = []
+            while queue:
+                cx, cy = queue.popleft()
+                cidx = cy * w + cx
+                cells.append(cidx)
+                for nx, ny in ((cx - 1, cy), (cx + 1, cy), (cx, cy - 1), (cx, cy + 1)):
+                    if 0 <= nx < w and 0 <= ny < h:
+                        nidx = ny * w + nx
+                        if not visited[nidx] and pixels[nx, ny][3] >= 20:
+                            visited[nidx] = 1
+                            queue.append((nx, ny))
+            components.append((len(cells), cells))
+
+    if len(components) <= 1:
+        return rgba
+    largest = max(size for size, _ in components)
+    # Keep the main body plus any substantial accessory parts (>= 1.5% of main body)
+    threshold = max(40, int(largest * 0.015))
+    for size, cells in components:
+        if size >= threshold:
+            continue
+        for cidx in cells:
+            cy, cx = divmod(cidx, w)
+            pixels[cx, cy] = (0, 0, 0, 0)
+    return rgba
+
+
+def key_out_green_screen(
+    image: Image.Image,
+    *,
+    hard_excess: float = 34.0,
+    soft_excess: float = 14.0,
+    strip_watermarks: bool = True,
+) -> Image.Image:
+    """Gradient-proof green-screen chroma key with edge despill and corner watermark removal."""
+    rgba = image.convert("RGBA")
+    w, h = rgba.size
+    if w == 0 or h == 0:
+        return rgba
+    pixels = rgba.load()
+
+    # Clear subtle corner watermark zones first if they are low-contrast green-tinted badges,
+    # then run green-dominance keying across the entire frame.
+    hard = max(2.0, float(hard_excess))
+    soft = max(0.0, min(hard - 1.0, float(soft_excess)))
+    span = max(1.0, hard - soft)
+
+    for y in range(h):
+        for x in range(w):
+            r, g, b, a = pixels[x, y]
+            if a == 0:
+                continue
+            max_rb = r if r >= b else b
+            excess = g - max_rb
+            if excess >= hard and g >= 60:
+                pixels[x, y] = (0, 0, 0, 0)
+            elif excess > soft and g >= 50:
+                # Smooth edge feather + green spill neutralization (clamp G toward max(R, B))
+                ratio = 1.0 - (excess - soft) / span
+                new_a = int(round(a * ratio))
+                if new_a < 18:
+                    pixels[x, y] = (0, 0, 0, 0)
+                else:
+                    despilled_g = int(round(max_rb + (g - max_rb) * max(0.0, ratio * 0.35)))
+                    pixels[x, y] = (r, min(255, despilled_g), b, new_a)
+            elif excess > 6 and g >= 50:
+                # Subtle despill on opaque fringe pixels next to green screen
+                despilled_g = max_rb + int((g - max_rb) * 0.5)
+                pixels[x, y] = (r, despilled_g, b, a)
+
+    if strip_watermarks:
+        rgba = _remove_detached_corner_watermarks(rgba)
+    return rgba
+
+
+def _find_ffmpeg() -> str | None:
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    local_app = Path.home() / "AppData" / "Local" / "Microsoft" / "WinGet" / "Packages"
+    if local_app.is_dir():
+        for candidate in local_app.rglob("ffmpeg.exe"):
+            if candidate.is_file():
+                return str(candidate)
+    return None
+
+
+def extract_frames_from_video(
+    video_path: Path,
+    fps: float,
+    work_dir: Path,
+    *,
+    start_sec: float | None = None,
+    end_sec: float | None = None,
+) -> list[Path]:
+    ffmpeg = _find_ffmpeg()
     if not ffmpeg:
         raise RuntimeError(
             "未检测到 ffmpeg。请安装 ffmpeg（例如 winget install Gyan.FFmpeg），或先将视频导出为 PNG 帧目录后再运行本脚本。"
         )
     out_pattern = work_dir / "frame_%05d.png"
-    command = [
-        ffmpeg,
-        "-y",
+    command = [ffmpeg, "-y"]
+    if start_sec is not None and start_sec > 0:
+        command.extend(["-ss", f"{start_sec:.3f}"])
+    if end_sec is not None and end_sec > 0:
+        command.extend(["-to", f"{end_sec:.3f}"])
+    command.extend([
         "-i",
         str(video_path),
         "-vf",
         f"fps={fps}",
         str(out_pattern),
-    ]
+    ])
     result = subprocess.run(command, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg 抽帧失败：{result.stderr[-400:]}")
     return sorted(work_dir.glob("frame_*.png"))
 
 
-def load_source_frames(source: Path, *, fps: float, temp_dir: Path) -> list[Image.Image]:
+def load_source_frames(
+    source: Path,
+    *,
+    fps: float,
+    temp_dir: Path,
+    start_sec: float | None = None,
+    end_sec: float | None = None,
+) -> list[Image.Image]:
     if source.is_dir():
         paths = sorted(
             p for p in source.iterdir()
@@ -261,7 +382,13 @@ def load_source_frames(source: Path, *, fps: float, temp_dir: Path) -> list[Imag
 
     suffix = source.suffix.lower()
     if suffix in VIDEO_SUFFIXES:
-        frame_paths = extract_frames_from_video(source, fps, temp_dir)
+        frame_paths = extract_frames_from_video(
+            source,
+            fps,
+            temp_dir,
+            start_sec=start_sec,
+            end_sec=end_sec,
+        )
         return [Image.open(p).convert("RGBA") for p in frame_paths]
 
     if suffix in IMAGE_SUFFIXES:
@@ -386,6 +513,7 @@ def convert_to_pet_webp(
     fps: float = 24.0,
     canvas_size: int = 512,
     bg_color: tuple[int, int, int] | None = None,
+    green_screen: bool = False,
     skip_keying: bool = False,
     tolerance: float = 42.0,
     feather: float = 28.0,
@@ -393,13 +521,23 @@ def convert_to_pet_webp(
     lossless: bool = False,
     loop_mode: str = "none",
     crossfade_frames: int = 8,
+    start_sec: float | None = None,
+    end_sec: float | None = None,
 ) -> tuple[Path, int]:
     with tempfile.TemporaryDirectory() as tmp:
-        raw_frames = load_source_frames(source, fps=fps, temp_dir=Path(tmp))
-    processed = (
-        raw_frames
-        if skip_keying
-        else [
+        raw_frames = load_source_frames(
+            source,
+            fps=fps,
+            temp_dir=Path(tmp),
+            start_sec=start_sec,
+            end_sec=end_sec,
+        )
+    if skip_keying:
+        processed = raw_frames
+    elif green_screen:
+        processed = [key_out_green_screen(frame) for frame in raw_frames]
+    else:
+        processed = [
             key_out_solid_background(
                 frame,
                 bg_color=bg_color,
@@ -408,7 +546,6 @@ def convert_to_pet_webp(
             )
             for frame in raw_frames
         ]
-    )
     aligned = align_frames_to_canvas(processed, canvas_size=canvas_size)
     looped = apply_loop_mode(
         aligned,
@@ -435,12 +572,15 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--fps", type=float, default=24.0, help="目标帧率，默认 24")
     parser.add_argument("--size", type=int, default=512, help="输出透明画布边长（512 或 720）")
     parser.add_argument("--bg-color", type=str, help="纯色背景十六进制，如 #C9E2F5 或 #00FF00（默认自动采样四角）")
+    parser.add_argument("--green-screen", action="store_true", help="使用抗明暗渐变绿幕色度抠图并自动去除角落水印")
     parser.add_argument("--tolerance", type=float, default=42.0, help="背景抠图容差，默认 42")
     parser.add_argument("--feather", type=float, default=28.0, help="边缘羽化宽度，默认 28")
     parser.add_argument("--no-key", action="store_true", help="源素材已透明，跳过纯色抠图")
     parser.add_argument("--quality", type=int, default=86, help="WebP 质量 1–100，默认 86")
     parser.add_argument("--lossless", action="store_true", help="使用无损透明 WebP")
     parser.add_argument("--oneshot", action="store_true", help="标记为单次播放动作（不循环）")
+    parser.add_argument("--start-sec", type=float, help="裁剪起始秒数")
+    parser.add_argument("--end-sec", type=float, help="裁剪结束秒数")
     parser.add_argument(
         "--loop-mode",
         choices=("none", "pingpong", "crossfade"),
@@ -461,6 +601,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         fps=args.fps,
         canvas_size=args.size,
         bg_color=bg_color,
+        green_screen=args.green_screen,
         skip_keying=args.no_key,
         tolerance=args.tolerance,
         feather=args.feather,
@@ -468,6 +609,8 @@ def main(argv: Iterable[str] | None = None) -> int:
         lossless=args.lossless,
         loop_mode=args.loop_mode,
         crossfade_frames=args.crossfade_frames,
+        start_sec=args.start_sec,
+        end_sec=args.end_sec,
     )
     print(f"已生成透明 WebP：{saved}（{count} 帧 @ {args.fps:g} fps，{args.size}x{args.size}）")
 
